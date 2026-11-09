@@ -16,8 +16,10 @@ LV_UP = (896, 470)
 @dataclass(frozen=True)
 class Action:
     name: str
-    point: tuple[int, int]
+    point: tuple[int, int] | None = None
     charge: tuple[int, int, int] | None = None
+    raw_point: bool = False
+    keyevent: int | None = None
 
 
 @dataclass

@@ -11,13 +11,17 @@ from time import monotonic, sleep
 import numpy as np
 from PIL import Image, ImageOps
 
+from ad_closer import AdCloser, KEYCODE_BACK
 from bluestacks_captcha import watch_target
 from captcha import VIEWPORT
 from emulator import (
+    AD_OVERLAY_PACKAGES,
     adb_run,
     ensure_adb_connected,
     foreground_activity,
+    foreground_window,
     format_instances,
+    is_ad_activity,
     resolve_target,
 )
 from tower_upgrade import Action, TowerUpgrade, lock_journal
@@ -59,8 +63,15 @@ SKILLS = tuple((x, bar_y, hero_y) for bar_y, hero_y in ((146, 184), (241, 277), 
                for x in (293, 373, 453))
 GAME_SCREENS = {"home", "gold", "replay_menu", "battle", "skip"}
 RETURN_SCREENS = GAME_SCREENS | {"victory", "defeat", "tower", "castles", "captcha"}
-AD_CLOSE_SCREENS = {"reward_granted", "ad_end_card", "ad_end_sheet"}
-AD_ACTIVITY = "com.google.android.gms.ads.AdActivity"
+AD_CLOSE_SCREENS = {
+    "reward_granted",
+    "ad_end_card",
+    "ad_end_sheet",
+    "ad_ui_close",
+    "ad_visual_close",
+    "ad_back",
+    "ad_external_overlay",
+}
 
 
 def viewport(image):
@@ -89,11 +100,14 @@ class Screen:
     layout: str | None = None
     level: int | None = None
     cost: int | None = None
+    raw_point: bool = False
+    keyevent: int | None = None
 
 
 class Vision:
     def __init__(self, upgrade_tower=False):
-        with np.load(Path(__file__).with_name("play_templates.npz"), allow_pickle=False) as atlas:
+        atlas_path = Path(__file__).with_name("play_templates.npz")
+        with np.load(atlas_path, allow_pickle=False) as atlas:
             self.templates = {name: atlas[name].astype(np.int16) for name in TEMPLATES}
         self.zero = pale_pixels(self.templates["hp_zero"], 145)
         # The progress bar behind the WAVE label changes from white to black.
@@ -103,6 +117,7 @@ class Vision:
         light_reward = Image.fromarray(self.templates["reward_light"].astype(np.uint8)).convert("L")
         self.reward_light = ImageOps.invert(light_reward)
         self.reward_mixed = Image.fromarray(self.templates["reward_mixed"].astype(np.uint8)).convert("L")
+        self.ad_closer = AdCloser(atlas_path)
         self.tower = None
         if upgrade_tower:
             from tower_vision import TowerVision
@@ -220,20 +235,7 @@ class Vision:
         rgb = np.asarray(frame, dtype=np.int16)
         return self.matches(rgb, "captcha") and self.matches(rgb, "captcha_start")
 
-    def classify(self, image, watching_ad=False, ad_foreground=False):
-        if image is None:
-            return Screen("ad_playing" if ad_foreground else "unknown")
-        rgb = np.asarray(image, dtype=np.int16)
-        if watching_ad or ad_foreground:
-            if point := self.reward_close(image):
-                return Screen("reward_granted", point)
-            if point := self.ad_end_close(rgb):
-                return Screen("ad_end_card", point)
-            if all(self.matches(rgb, name)
-                   for name in ("ad_sheet_close", "ad_sheet_chevron", "ad_sheet_cta")):
-                return Screen("ad_end_sheet", (1257, 39))
-        if ad_foreground:
-            return Screen("ad_playing")
+    def _classify_game_screen(self, rgb):
         if self.matches(rgb, "captcha"):
             return Screen("captcha")
         if self.matches(rgb, "processing"):
@@ -266,6 +268,49 @@ class Vision:
             return Screen("battle", ready=tuple(ready))
         return Screen("unknown")
 
+    def classify(
+        self,
+        image,
+        watching_ad=False,
+        ad_foreground=False,
+        *,
+        original=None,
+        time=0.0,
+        adb=None,
+        serial=None,
+    ):
+        rgb = np.asarray(image, dtype=np.int16) if image is not None else None
+        if rgb is not None and (watching_ad or ad_foreground):
+            if point := self.reward_close(image):
+                return Screen("reward_granted", point)
+            if point := self.ad_end_close(rgb):
+                return Screen("ad_end_card", point)
+            if all(self.matches(rgb, name)
+                   for name in ("ad_sheet_close", "ad_sheet_chevron", "ad_sheet_cta")):
+                return Screen("ad_end_sheet", (1257, 39))
+
+        if not ad_foreground and rgb is not None:
+            game = self._classify_game_screen(rgb)
+            if game.name != "unknown":
+                self.ad_closer.reset()
+                return game
+
+        if watching_ad or ad_foreground:
+            raw_frame = original if original is not None else image
+            sig = self.ad_closer.inspect(
+                time,
+                raw_frame,
+                adb=adb,
+                serial=serial,
+                ad_foreground=ad_foreground,
+            )
+            if sig is not None:
+                return Screen(sig.kind, sig.point, raw_point=sig.raw_point, keyevent=sig.keyevent)
+            return Screen("ad_playing" if ad_foreground else "unknown")
+
+        self.ad_closer.reset()
+        return Screen("unknown")
+
 
 class Player:
     def __init__(self, mode, report, tower=None, auto_captcha=False, *, watch_ads=True):
@@ -275,6 +320,7 @@ class Player:
         self.auto_captcha = auto_captcha
         self.watch_ads = watch_ads
         self.screen = "unknown"
+        self.screen_target = None
         self.since = 0
         self.acted = False
         self.wait_notified = False
@@ -305,15 +351,42 @@ class Player:
                 self.ad = "playing"
             if age >= 1.5:
                 self.ad_close_attempts.clear()
+        elif name == "ad_resume":
+            if age >= 0.15 and self.ad_taps < 12:
+                self.ad = "playing"
+                self.ad_close_attempts.clear()
+                self.ad_taps += 1
+                return Action("resume ad for reward", screen.point, raw_point=screen.raw_point)
         elif name in AD_CLOSE_SCREENS:
             self.ad = "return"
             self.reward_label_seen |= name == "reward_granted"
-            attempts, last_tap = self.ad_close_attempts.get(name, (0, float("-inf")))
-            if age >= 0.20 and attempts < 3 and self.ad_taps < 9 and time - last_tap >= 1.5:
-                self.ad_close_attempts[name] = (attempts + 1, time)
+            if screen.keyevent is not None:
+                attempt_key = (name, "key", screen.keyevent)
+            elif screen.point is not None and name in {"ad_ui_close", "ad_visual_close"}:
+                attempt_key = (name, screen.point[0] // 24, screen.point[1] // 24)
+            else:
+                attempt_key = name
+            max_attempts = 2 if name == "ad_back" else 3
+            cooldown = 4.0 if name == "ad_back" else (2.0 if name == "ad_external_overlay" else 1.5)
+            min_age = 0.60 if name == "ad_external_overlay" else 0.20
+            attempts, last_tap = self.ad_close_attempts.get(attempt_key, (0, float("-inf")))
+            if age >= min_age and attempts < max_attempts and self.ad_taps < 12 and time - last_tap >= cooldown:
+                self.ad_close_attempts[attempt_key] = (attempts + 1, time)
                 self.ad_taps += 1
-                label = "close granted ad" if name == "reward_granted" else "close ad end card"
-                return Action(label, screen.point)
+                if name == "reward_granted":
+                    label = "close granted ad"
+                elif name == "ad_external_overlay":
+                    label = "dismiss ad overlay (BACK)"
+                elif name == "ad_back":
+                    label = "close finished ad (BACK)"
+                else:
+                    label = "close ad end card"
+                return Action(
+                    label,
+                    screen.point,
+                    raw_point=screen.raw_point,
+                    keyevent=screen.keyevent,
+                )
         elif name in RETURN_SCREENS and age >= 0.55:
             if self.ad == "return":
                 changed = (screen.gold is not None and self.gold_before is not None
@@ -336,13 +409,17 @@ class Player:
             # The inline offer leaves the home controls and tower slots available.
             screen = replace(screen, name="home")
         name = screen.name
-        previous = self.screen
-        if name != previous:
-            self.screen, self.since = name, time
+        target_bucket = (
+            (screen.point[0] // 24, screen.point[1] // 24)
+            if screen.point is not None and name in AD_CLOSE_SCREENS
+            else None
+        )
+        if name != self.screen or target_bucket != self.screen_target:
+            self.screen, self.screen_target, self.since = name, target_bucket, time
             self.acted = False
             self.wait_notified = False
         age = time - self.since
-        if self.ad is None and (name == "ad_playing" or name in AD_CLOSE_SCREENS):
+        if self.ad is None and (name in {"ad_playing", "ad_resume"} or name in AD_CLOSE_SCREENS):
             self.start_ad(time)
             self.skip_offer = True
         if self.ad:
@@ -478,15 +555,34 @@ def play(args, target, report, journal):
         )
 
     for time, original in frames:
+        activity = None
         if args.video:
-            screen = vision.classify(viewport(original), watching_ad=player.ad is not None)
+            screen = vision.classify(
+                viewport(original),
+                watching_ad=player.ad is not None,
+                original=original,
+                time=time,
+            )
         else:
-            activity = foreground_activity(target.adb, target.serial)
-            # An ad can show footage of a game. Its Android window owns the
-            # frame until it closes, even if the image resembles a game screen.
-            screen = (vision.classify(viewport(original), watching_ad=player.ad is not None,
-                                      ad_foreground=activity == AD_ACTIVITY)
-                      if activity else Screen("unfocused"))
+            package, win_activity = foreground_window(target.adb, target.serial)
+            if package == "com.raongames.growcastle" and win_activity:
+                activity = win_activity
+                # An ad can show footage of a game. Its Android window owns the
+                # frame until it closes, even if the image resembles a game screen.
+                screen = vision.classify(
+                    viewport(original),
+                    watching_ad=player.ad is not None,
+                    ad_foreground=is_ad_activity(activity),
+                    original=original,
+                    time=time,
+                    adb=target.adb,
+                    serial=target.serial,
+                )
+            elif player.ad is not None and package in AD_OVERLAY_PACKAGES:
+                screen = Screen("ad_external_overlay", keyevent=KEYCODE_BACK)
+            else:
+                vision.ad_closer.reset()
+                screen = Screen("unfocused")
         was_paused = player.paused
         action = player.feed(time, screen)
         if args.auto_captcha and player.paused and not was_paused:
@@ -505,23 +601,31 @@ def play(args, target, report, journal):
             else:
                 report(time + monotonic() - attempt_started, "CAPTCHA: waiting for manual solution")
         if action:
-            if args.tap:
-                if action.charge is not None:
-                    raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
-                    with Image.open(BytesIO(raw)) as check:
-                        latest = vision.classify(viewport(check))
-                        if (check.size != original.size or latest.name != "tower"
-                                or (latest.gems, latest.level, latest.cost) != action.charge
-                                or foreground_activity(target.adb, target.serial) != activity):
-                            tower.suspend()
-                            continue
+            if action.keyevent is not None:
+                if args.tap:
+                    adb_run(target.adb, target.serial, "shell", "input", "keyevent", str(action.keyevent))
+                report(time, f"{prefix} {action.name}")
+            else:
+                if args.tap:
+                    if action.charge is not None:
+                        raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
+                        with Image.open(BytesIO(raw)) as check:
+                            latest = vision.classify(viewport(check))
+                            if (check.size != original.size or latest.name != "tower"
+                                    or (latest.gems, latest.level, latest.cost) != action.charge
+                                    or foreground_activity(target.adb, target.serial) != activity):
+                                tower.suspend()
+                                continue
+                        tower.record_tap(action)
+                    if action.raw_point:
+                        x, y = round(action.point[0]), round(action.point[1])
+                    else:
+                        x = round(action.point[0] * original.width / VIEWPORT[0])
+                        y = round(action.point[1] * original.height / VIEWPORT[1])
+                    adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
+                elif action.charge is not None:
                     tower.record_tap(action)
-                x = round(action.point[0] * original.width / VIEWPORT[0])
-                y = round(action.point[1] * original.height / VIEWPORT[1])
-                adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
-            elif action.charge is not None:
-                tower.record_tap(action)
-            report(time, f"{prefix} {action.name} {action.point}")
+                report(time, f"{prefix} {action.name} {action.point}")
 
 
 def _device_lock_key(target) -> str:
