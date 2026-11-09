@@ -125,8 +125,13 @@ Tool mặc định tự xem quảng cáo thưởng vàng. Dùng `--ads` để b�
 ```
 
 1. Sau khi thắng, tool chờ hộp thưởng xuất hiện trước khi đánh tiếp, nhận diện biểu tượng vàng cùng nút **GET** (có hoặc không có dòng đếm ngược) rồi bấm một lần.
-2. Khi cửa sổ quảng cáo đang hiển thị, tool tạm dừng vào trận, dùng kỹ năng, giải CAPTCHA và nâng tháp.
-3. Tool nhận các mẫu **Reward granted** có dấu **X** liền kề, mẫu hai thẻ **Learn More** và thẻ **Watch now** có nút đóng riêng, bấm **X** tối đa ba lần cho mỗi dạng màn kết thúc (giới hạn chín lần cho cả lượt). Game tự cộng vàng khi quay lại.
+2. Khi cửa sổ quảng cáo đang hiển thị (AdMob, UnityAds, AppLovin, IronSource, Vungle, Mintegral...), tool tạm dừng vào trận, dùng kỹ năng, giải CAPTCHA và nâng tháp.
+3. Khi quảng cáo phát xong, tool kết hợp 4 lớp để đóng quảng cáo trên cả **màn hình ngang (`16:9`) lẫn quảng cáo xoay dọc (`9:16`)**, hỗ trợ cả **Tiếng Việt lẫn Tiếng Anh**:
+   - Đối chiếu nhanh các mẫu ảnh kết thúc quen thuộc (**Reward granted**, **Learn More**, **Watch now**).
+   - Đọc trực tiếp cây giao diện Android (`uiautomator dump`) để lấy tọa độ thật của nút **Đóng / Close / Bỏ qua / Skip / `>>` / `✕`** hoặc nút cạnh nhãn *Đã trao phần thưởng* (tự chờ nếu còn bộ đếm ngược, và tự bấm **Tiếp tục xem / Resume** nếu hiện hộp thoại cảnh báo mất thưởng).
+   - Dò hình học biểu tượng nút **`X`** ở góc trên màn hình cho các quảng cáo WebGL/Canvas không xuất cây UI.
+   - Tự gửi phím **BACK** của Android nếu quảng cáo tự bật bảng Google Play đè lên hoặc bị kẹt ở màn kết thúc sau khi đã hết giờ.
+4. Game tự cộng vàng khi quay lại màn chính (`gold HUD changed`).
 
 ### Tự giải CAPTCHA trong auto play
 

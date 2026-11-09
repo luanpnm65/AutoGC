@@ -19,9 +19,45 @@ _BLUESTACKS_REG_KEYS = (
 _VIEWPORT_CLASSES = ("BlueStacksApp", "RenderWindow", "subWin", "TheRender")
 _INPUT_CLASSES = ("plrNativeInputWindow",)
 _VIEWPORT_TITLES = ("BlueStacks Android PluginAndroid", "_ctl.Window", "HD-Player", "TheRender")
-_GROWCASTLE_FOCUS_RE = re.compile(r"mCurrentFocus=Window\{[^\r\n}]*\bcom\.raongames\.growcastle/([^\s}]+)")
+_WINDOW_FOCUS_RE = re.compile(
+    r"mCurrentFocus=Window\{[^\r\n}]*?[\s{]([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/([^\s}]+)"
+)
 _CURRENT_FOCUS_LINE_RE = re.compile(r"mCurrentFocus=(.+)")
-_FOCUSED_APP_RE = re.compile(r"mFocusedApp=[^\r\n]*\bcom\.raongames\.growcastle/([^\s}]+)")
+_FOCUSED_APP_WINDOW_RE = re.compile(
+    r"mFocusedApp=[^\r\n]*?[\s{]([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)/([^\s}]+)"
+)
+AD_OVERLAY_PACKAGES = frozenset({
+    "com.android.vending",
+    "com.google.android.finsky",
+    "com.android.chrome",
+    "com.android.browser",
+    "com.sec.android.app.sbrowser",
+    "org.mozilla.firefox",
+    "com.microsoft.emmx",
+    "android",
+})
+_AD_ACTIVITY_HINTS = (
+    "com.google.android.gms.ads",
+    "adactivity",
+    "adunit",
+    "adview",
+    "applovin",
+    "unity3d.services.ads",
+    "ironsource",
+    "vungle",
+    "mbridge",
+    "bytedance",
+    "facebook.ads",
+    "chartboost",
+    "inmobi",
+    "fyber",
+    "digitalturbine",
+    "adcolony",
+    "tapjoy",
+    "reward",
+    "interstitial",
+    "fullscreen",
+)
 _CONF_LINE_RE = re.compile(r'^\s*([A-Za-z0-9_.-]+)\s*=\s*"?(.*?)"?\s*$')
 _INSTANCE_KEY_RE = re.compile(r"^bst\.instance\.([A-Za-z0-9_]+)\.(.+)$")
 _INSTANCE_SUFFIX_RE = re.compile(r"^(.+?)(?:_(\d+))?$")
@@ -411,21 +447,42 @@ def adb_run(adb: Path, serial: str, *arguments, timeout=8) -> bytes:
         raise
 
 
-def parse_foreground_activity(dumpsys_text: str) -> str | None:
-    match = _GROWCASTLE_FOCUS_RE.search(dumpsys_text)
+def parse_foreground_window(dumpsys_text: str) -> tuple[str | None, str | None]:
+    match = _WINDOW_FOCUS_RE.search(dumpsys_text)
     if match:
-        return match.group(1)
+        return match.group(1), match.group(2)
     focus_line = _CURRENT_FOCUS_LINE_RE.search(dumpsys_text)
-    if focus_line and focus_line.group(1).strip().startswith("null"):
-        app_match = _FOCUSED_APP_RE.search(dumpsys_text)
-        if app_match:
-            return app_match.group(1)
-    return None
+    if focus_line:
+        raw_focus = focus_line.group(1).strip()
+        if raw_focus.startswith("null") or "PopupWindow:" in raw_focus:
+            app_match = _FOCUSED_APP_WINDOW_RE.search(dumpsys_text)
+            if app_match:
+                return app_match.group(1), app_match.group(2)
+    return None, None
+
+
+def foreground_window(adb: Path, serial: str) -> tuple[str | None, str | None]:
+    focus = adb_run(adb, serial, "shell", "dumpsys", "window").decode(errors="replace")
+    return parse_foreground_window(focus)
+
+
+def parse_foreground_activity(dumpsys_text: str) -> str | None:
+    package, activity = parse_foreground_window(dumpsys_text)
+    return activity if package == "com.raongames.growcastle" else None
 
 
 def foreground_activity(adb: Path, serial: str) -> str | None:
-    focus = adb_run(adb, serial, "shell", "dumpsys", "window").decode(errors="replace")
-    return parse_foreground_activity(focus)
+    package, activity = foreground_window(adb, serial)
+    return activity if package == "com.raongames.growcastle" else None
+
+
+def is_ad_activity(activity: str | None) -> bool:
+    if not activity:
+        return False
+    lowered = activity.lower()
+    if lowered.startswith(("org.cocos2dx.", "com.raongames.growcastle.")):
+        return False
+    return any(hint in lowered for hint in _AD_ACTIVITY_HINTS)
 
 
 # --- Win32 process, window discovery, and screen capture helpers ---
