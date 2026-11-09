@@ -42,16 +42,23 @@ class Batch:
 
 
 @contextmanager
-def lock_journal(path, conflict="A tower upgrade process already owns this LDPlayer journal."):
+def lock_journal(path, conflict="A tower upgrade process already owns this emulator journal."):
     if path is None:
         yield
         return
-    import msvcrt
-
     with path.with_suffix(".lock").open("a+b") as handle:
         handle.seek(0)
         try:
+            import msvcrt
+
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        except ImportError:
+            import fcntl
+
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise RuntimeError(conflict) from exc
         except OSError as exc:
             raise RuntimeError(conflict) from exc
         yield

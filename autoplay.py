@@ -1,19 +1,25 @@
-"""Play Grow Castle waves, cast ready skills, and collect gold ads on LDPlayer."""
+"""Play Grow Castle waves, cast ready skills, and collect gold ads on BlueStacks 5 or LDPlayer 9."""
 
 import argparse
 from dataclasses import dataclass, replace
 from io import BytesIO
 from hashlib import sha256
 from pathlib import Path
-import re
 import subprocess
 from time import monotonic, sleep
 
 import numpy as np
 from PIL import Image, ImageOps
 
+from bluestacks_captcha import watch_target
 from captcha import VIEWPORT
-from ldplayer_captcha import run, watch
+from emulator import (
+    adb_run,
+    ensure_adb_connected,
+    foreground_activity,
+    format_instances,
+    resolve_target,
+)
 from tower_upgrade import Action, TowerUpgrade, lock_journal
 from windows_video import read_video
 
@@ -433,7 +439,7 @@ def adb_frames(adb, serial, seconds):
     start = monotonic()
     while not seconds or monotonic() - start < seconds:
         sample = monotonic()
-        raw = run(adb, "-s", serial, "exec-out", "screencap", "-p")
+        raw = adb_run(adb, serial, "exec-out", "screencap", "-p")
         with Image.open(BytesIO(raw)) as screen:
             yield sample - start, screen.copy()
         sleep(max(0, 0.22 - (monotonic() - sample)))
@@ -447,26 +453,35 @@ def replay_frames(video):
             next_sample += 0.20
 
 
-def foreground_activity(adb, serial):
-    focus = run(adb, "-s", serial, "shell", "dumpsys window | grep mCurrentFocus || true")
-    match = re.search(r"mCurrentFocus=.*\bcom\.raongames\.growcastle/([^\s}]+)",
-                      focus.decode(errors="replace"))
-    return match[1] if match else None
-
-
-def play(args, report, journal):
+def play(args, target, report, journal):
     tower = TowerUpgrade(report, journal) if args.upgrade_tower else None
     player = Player(args.mode, report, tower, args.auto_captcha, watch_ads=args.ads)
     vision = Vision(args.upgrade_tower)
-    adb = args.ldconsole.with_name("adb.exe")
-    frames = replay_frames(args.video) if args.video else adb_frames(adb, args.serial, args.seconds)
     prefix = "TAP" if args.tap else "PREVIEW"
-    print(f"{prefix} mode={args.mode} source={args.video or args.serial}", flush=True)
+    if args.video:
+        frames = replay_frames(args.video)
+        print(f"{prefix} mode={args.mode} source={args.video}", flush=True)
+    else:
+        connected_serial = ensure_adb_connected(
+            target.adb,
+            target.serial,
+            conf=target.conf,
+            instance_key=target.instance if target.emulator == "bluestacks" else None,
+            allow_port_refresh=(target.emulator == "bluestacks" and not args.serial),
+        )
+        target = replace(target, serial=connected_serial)
+        frames = adb_frames(target.adb, target.serial, args.seconds)
+        print(
+            f"{prefix} mode={args.mode} emulator={target.emulator} "
+            f"instance={target.instance} ({target.display_name!r}) source={target.serial}",
+            flush=True,
+        )
+
     for time, original in frames:
         if args.video:
             screen = vision.classify(viewport(original), watching_ad=player.ad is not None)
         else:
-            activity = foreground_activity(adb, args.serial)
+            activity = foreground_activity(target.adb, target.serial)
             # An ad can show footage of a game. Its Android window owns the
             # frame until it closes, even if the image resembles a game screen.
             screen = (vision.classify(viewport(original), watching_ad=player.ad is not None,
@@ -478,8 +493,8 @@ def play(args, report, journal):
             attempt_started = monotonic()
             limit = min(16, args.seconds - time) if args.seconds else 16
             try:
-                selected = limit > 0 and watch(
-                    args.ldconsole, args.index, args.serial, limit, True,
+                selected = limit > 0 and watch_target(
+                    target, limit, True,
                     start_screen=vision.captcha_start_visible,
                 )
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
@@ -492,32 +507,45 @@ def play(args, report, journal):
         if action:
             if args.tap:
                 if action.charge is not None:
-                    raw = run(adb, "-s", args.serial, "exec-out", "screencap", "-p")
+                    raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
                     with Image.open(BytesIO(raw)) as check:
                         latest = vision.classify(viewport(check))
                         if (check.size != original.size or latest.name != "tower"
                                 or (latest.gems, latest.level, latest.cost) != action.charge
-                                or foreground_activity(adb, args.serial) != activity):
+                                or foreground_activity(target.adb, target.serial) != activity):
                             tower.suspend()
                             continue
                     tower.record_tap(action)
                 x = round(action.point[0] * original.width / VIEWPORT[0])
                 y = round(action.point[1] * original.height / VIEWPORT[1])
-                run(adb, "-s", args.serial, "shell", "input", "tap", str(x), str(y))
+                adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
             elif action.charge is not None:
                 tower.record_tap(action)
             report(time, f"{prefix} {action.name} {action.point}")
+
+
+def _device_lock_key(target) -> str:
+    if (target.emulator == "bluestacks" and target.conf is not None
+            and target.instance and target.instance != target.serial):
+        return f"bluestacks:{target.conf.resolve()}:{target.instance}"
+    return target.serial
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path, help="preview decisions on a recorded MP4")
     parser.add_argument("--mode", choices=("wave", "replay"), default="wave")
-    parser.add_argument("--ldconsole", type=Path, default=Path(r"D:\LDPlayer\LDPlayer9\ldconsole.exe"))
-    parser.add_argument("--serial", help="ADB serial (defaults to emulator-5554 for index 0)")
-    parser.add_argument("--index", type=int, default=0, help="LDPlayer instance index for CAPTCHA capture")
+    parser.add_argument("--emulator", choices=("bluestacks", "ldplayer"),
+                        help="target emulator (default: bluestacks, or ldplayer when --ldconsole is given)")
+    parser.add_argument("--instance", help="BlueStacks 5 instance key or window title (e.g. Pie64, Pie64_1)")
+    parser.add_argument("--index", type=int, help="emulator instance index (0, 1, 2, ...)")
+    parser.add_argument("--serial", help="ADB serial override (e.g. 127.0.0.1:5555 or emulator-5554)")
+    parser.add_argument("--adb", type=Path, help="path to HD-Adb.exe or adb.exe (auto-detected by default)")
+    parser.add_argument("--conf", type=Path, help="path to bluestacks.conf (auto-detected by default)")
+    parser.add_argument("--ldconsole", type=Path, help="path to ldconsole.exe (for LDPlayer 9)")
+    parser.add_argument("--list", action="store_true", help="list detected emulator instances and exit")
     parser.add_argument("--seconds", type=float, default=0, help="live capture limit, 0 waits indefinitely")
-    parser.add_argument("--tap", action="store_true", help="send the recognized actions to LDPlayer")
+    parser.add_argument("--tap", action="store_true", help="send the recognized actions to the emulator")
     parser.add_argument("--ads", action=argparse.BooleanOptionalAction, default=True,
                         help="open gold reward ads automatically (default: enabled)")
     parser.add_argument("--auto-captcha", action="store_true",
@@ -529,22 +557,36 @@ def main():
         parser.error("--video is preview only")
     if args.auto_captcha and not args.tap:
         parser.error("--auto-captcha requires --tap")
-    if args.seconds < 0 or args.index < 0:
+    if args.seconds < 0 or (args.index is not None and args.index < 0):
         parser.error("--seconds and --index must be nonnegative")
-    args.serial = args.serial or f"emulator-{5554 + 2 * args.index}"
 
     def report(time, message):
         print(f"{time:6.2f}s  {message}", flush=True)
 
-    journal = session_lock = None
-    if args.tap:
-        device_id = sha256(args.serial.encode()).hexdigest()[:16]
-        session_lock = Path(__file__).with_name(f".autoplay-{device_id}.lock")
-        if args.upgrade_tower:
-            journal = Path(__file__).with_name(f".tower-upgrade-{device_id}.json")
     try:
-        with lock_journal(session_lock, f"Autoplay is already running with --tap on {args.serial}."), lock_journal(journal):
-            play(args, report, journal)
+        if args.list:
+            emu = args.emulator or ("ldplayer" if args.ldconsole else "bluestacks")
+            print(format_instances(emulator=emu, adb=args.adb, conf=args.conf, ldconsole=args.ldconsole))
+            return
+
+        target = None if args.video else resolve_target(
+            emulator=args.emulator,
+            instance=args.instance,
+            index=args.index,
+            serial=args.serial,
+            adb=args.adb,
+            conf=args.conf,
+            ldconsole=args.ldconsole,
+        )
+        journal = session_lock = None
+        if args.tap and target is not None:
+            device_id = sha256(_device_lock_key(target).encode()).hexdigest()[:16]
+            session_lock = Path(__file__).with_name(f".autoplay-{device_id}.lock")
+            if args.upgrade_tower:
+                journal = Path(__file__).with_name(f".tower-upgrade-{device_id}.json")
+        conflict_label = f"{target.instance} ({target.serial})" if target else "device"
+        with lock_journal(session_lock, f"Autoplay is already running with --tap on {conflict_label}."), lock_journal(journal):
+            play(args, target, report, journal)
     except KeyboardInterrupt:
         pass
     except subprocess.CalledProcessError as exc:
