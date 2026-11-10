@@ -83,8 +83,19 @@ BOSS_GLYPH = (
     "@@.........@@@@@......@@@@.........@@@.........@@",
     "..@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
 )
-SKILLS = tuple((x, bar_y, hero_y) for bar_y, hero_y in ((146, 184), (241, 277), (331, 370))
-               for x in (293, 373, 453))
+ARCHER_SKILLS = (
+    ("archer skill 1", 135, 363, 405),
+    ("archer skill 2", 135, 480, 522),
+)
+HERO_SKILLS = tuple(
+    (f"skill {idx}", x, bar_y, hero_y)
+    for idx, (x, bar_y, hero_y) in enumerate(
+        ((x, bar_y, hero_y) for bar_y, hero_y in ((146, 184), (241, 277), (331, 370))
+         for x in (293, 373, 453)),
+        start=1,
+    )
+)
+SKILLS = ARCHER_SKILLS + HERO_SKILLS
 GAME_SCREENS = {"home", "gold", "replay_menu", "battle", "skip"}
 RETURN_SCREENS = GAME_SCREENS | {"victory", "defeat", "tower", "castles", "captcha"}
 AD_CLOSE_SCREENS = {
@@ -334,7 +345,7 @@ class Vision:
         if hud and self.matches(rgb, "speed") and (
                 self.matches(rgb, "wave") or self.matches_boss(rgb)):
             ready = []
-            for index, (x, y, _) in enumerate(SKILLS):
+            for index, (_, x, y, _) in enumerate(SKILLS):
                 red, green, blue = rgb[y-2:y+3, x-24:x+25].transpose(2, 0, 1)
                 cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
                 if cyan.mean() >= 0.92:
@@ -581,8 +592,8 @@ class Player:
             if index not in self.skills_used:
                 self.skills_used[index] = 0
                 self.last_skill = time
-                x, _, y = SKILLS[index]
-                return Action(f"cast skill {index + 1}", (x, y))
+                label, x, _, y = SKILLS[index]
+                return Action(f"cast {label}", (x, y))
         return None
 
 
