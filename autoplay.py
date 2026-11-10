@@ -59,8 +59,43 @@ TEMPLATES = {
     "ad_sheet_cta": ((958, 535, 1162, 589), 16),
 }
 GOLD_HUD = (36, 4, 194, 39)
-SKILLS = tuple((x, bar_y, hero_y) for bar_y, hero_y in ((146, 184), (241, 277), (331, 370))
-               for x in (293, 373, 453))
+BOSS_BAR_REGION = (360, 30, 780, 78)
+BOSS_FFT_SHAPE = (64, 512)
+# Invariant white strokes ('#') and dark outline ('@') of the BOSS health bar label;
+# '.' marks the HP fill area so matching succeeds whether Boss HP is full red or empty black.
+BOSS_GLYPH = (
+    ".@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@.........@@@@@.......@@@@@.........@@@@........",
+    "@.########.@@@@@.#####.@@@@@.#######.@@@.########",
+    "@.########...@@..#####...@...#######.@@..########",
+    "@.##......##.@.##.....##.@.##........@.##........",
+    "@.##.@..@.##.@.##@...@##.@.##@.........##.@......",
+    "@.##.@....##.@.##@...@##.@.##@.........##.@......",
+    "@.##......##.@.##@...@##.@.#.......@...##......@.",
+    "@.########..@@.##@...@##.@...#####.@.....######.@",
+    "@.########...@.##@...@##...@.#####...@...######..",
+    "@.##.@@@@.##.@.##@...@##....@@@@@@.#.@..@@@@@@.##",
+    "@.##.@....##.@.##@...@##.........@.#.@.........##",
+    "@.##.@@@@.##.@.##@...@##.@@@@@@@@@.#.@@@@@@@@@.##",
+    "@.##......##.@.##.....##.@.........#.@.........##",
+    "@.########..@@...#####...@.#######...@.########..",
+    "@.########.@@@@@.#####.@@@.#######.@@@.########.@",
+    "@@.........@@@@@......@@@@.........@@@.........@@",
+    "..@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+)
+ARCHER_SKILLS = (
+    ("archer skill 1", 135, 363, 405),
+    ("archer skill 2", 135, 480, 522),
+)
+HERO_SKILLS = tuple(
+    (f"skill {idx}", x, bar_y, hero_y)
+    for idx, (x, bar_y, hero_y) in enumerate(
+        ((x, bar_y, hero_y) for bar_y, hero_y in ((146, 184), (241, 277), (331, 370))
+         for x in (293, 373, 453)),
+        start=1,
+    )
+)
+SKILLS = ARCHER_SKILLS + HERO_SKILLS
 GAME_SCREENS = {"home", "gold", "replay_menu", "battle", "skip"}
 RETURN_SCREENS = GAME_SCREENS | {"victory", "defeat", "tower", "castles", "captcha"}
 AD_CLOSE_SCREENS = {
@@ -117,12 +152,61 @@ class Vision:
         light_reward = Image.fromarray(self.templates["reward_light"].astype(np.uint8)).convert("L")
         self.reward_light = ImageOps.invert(light_reward)
         self.reward_mixed = Image.fromarray(self.templates["reward_mixed"].astype(np.uint8)).convert("L")
+        self.boss_kernels = self._build_boss_kernels()
         self.ad_closer = AdCloser(atlas_path)
         self.tower = None
         if upgrade_tower:
             from tower_vision import TowerVision
 
             self.tower = TowerVision()
+
+    @staticmethod
+    def _build_boss_kernels():
+        white_base = Image.fromarray(
+            np.array([[255 if ch == "#" else 0 for ch in row] for row in BOSS_GLYPH], dtype=np.uint8),
+            "L",
+        )
+        dark_base = Image.fromarray(
+            np.array([[255 if ch == "@" else 0 for ch in row] for row in BOSS_GLYPH], dtype=np.uint8),
+            "L",
+        )
+        kernels = []
+        for scale in (0.95, 1.10, 1.25, 1.38, 1.48):
+            size = (round(white_base.width * scale), round(white_base.height * scale))
+            white = np.asarray(white_base.resize(size, Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+            dark = np.asarray(dark_base.resize(size, Image.Resampling.BILINEAR), dtype=np.float32) / 255.0
+            mask = ((white > 0.45) | (dark > 0.45)).astype(np.float32)
+            target = np.where(white > dark, 1.0, 0.0).astype(np.float32)
+            m_sum = float(mask.sum())
+            t_mean = float((target * mask).sum() / m_sum)
+            k_zero = (target - t_mean) * mask
+            k_norm = float(np.sqrt(np.sum(k_zero * k_zero)))
+            k_fft = np.fft.rfft2(k_zero[::-1, ::-1], s=BOSS_FFT_SHAPE)
+            m_fft = np.fft.rfft2(mask[::-1, ::-1], s=BOSS_FFT_SHAPE)
+            kernels.append((size[1], size[0], k_fft, m_fft, m_sum, k_norm))
+        return tuple(kernels)
+
+    def matches_boss(self, rgb):
+        # min(R, G, B) maps white BOSS strokes high (~250) and both black outline (~15)
+        # and red/empty HP fill (~20..77) low, while ignoring unmasked fill pixels.
+        patch = region(rgb, BOSS_BAR_REGION).min(axis=2).astype(np.float32)
+        if patch.max() - patch.min() < 70:
+            return False
+        p_fft = np.fft.rfft2(patch, s=BOSS_FFT_SHAPE)
+        p2_fft = np.fft.rfft2(patch * patch, s=BOSS_FFT_SHAPE)
+        ph, pw = patch.shape
+        for kh, kw, k_fft, m_fft, m_sum, k_norm in self.boss_kernels:
+            numer = np.fft.irfft2(p_fft * k_fft, s=BOSS_FFT_SHAPE)[kh - 1:ph, kw - 1:pw]
+            w_sum = np.fft.irfft2(p_fft * m_fft, s=BOSS_FFT_SHAPE)[kh - 1:ph, kw - 1:pw]
+            w_sum2 = np.fft.irfft2(p2_fft * m_fft, s=BOSS_FFT_SHAPE)[kh - 1:ph, kw - 1:pw]
+            w_std = np.sqrt(np.maximum(0.0, w_sum2 - (w_sum * w_sum) / m_sum))
+            valid = w_std >= 28.0 * np.sqrt(m_sum)
+            if not np.any(valid):
+                continue
+            corr = np.where(valid, numer / (w_std * k_norm + 1e-6), -1.0)
+            if corr.max() >= 0.78:
+                return True
+        return False
 
     def matches(self, rgb, name, offset_y=0):
         box, tolerance = TEMPLATES[name]
@@ -258,9 +342,10 @@ class Vision:
                 return self.home_screen(rgb)
         if self.tower is not None and self.tower.is_home(rgb):
             return self.home_screen(rgb)
-        if hud and self.matches(rgb, "wave") and self.matches(rgb, "speed"):
+        if hud and self.matches(rgb, "speed") and (
+                self.matches(rgb, "wave") or self.matches_boss(rgb)):
             ready = []
-            for index, (x, y, _) in enumerate(SKILLS):
+            for index, (_, x, y, _) in enumerate(SKILLS):
                 red, green, blue = rgb[y-2:y+3, x-24:x+25].transpose(2, 0, 1)
                 cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
                 if cyan.mean() >= 0.92:
@@ -507,8 +592,8 @@ class Player:
             if index not in self.skills_used:
                 self.skills_used[index] = 0
                 self.last_skill = time
-                x, _, y = SKILLS[index]
-                return Action(f"cast skill {index + 1}", (x, y))
+                label, x, _, y = SKILLS[index]
+                return Action(f"cast {label}", (x, y))
         return None
 
 
