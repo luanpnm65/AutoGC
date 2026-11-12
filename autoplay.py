@@ -27,6 +27,7 @@ from emulator import (
     resolve_target,
 )
 from tower_upgrade import Action, TowerUpgrade, lock_journal
+from tower_vision import load_gem_templates, read_white_gems
 from windows_video import read_video
 
 
@@ -109,6 +110,14 @@ AD_CLOSE_SCREENS = {
     "ad_back",
     "ad_external_overlay",
 }
+SKIP_CLOSE_POINT = (888, 216)
+SKIP_30_POINT = (809, 365)
+SKIP_GEM_THRESHOLD = 30
+SKIP_30_MASK_SHAPE = (35, 72)
+SKIP_30_MASK_B85 = (
+    "c-muNfPwn|e;De2fEoW7fNboHKP><MgH$sg;0I!y40aI1hJl~K9>k~tGU`znHZTVJ0e<H9P+jcp="
+    "#2JeFyjG#KbXN_$Nz&FKcfQ3Xn-*oFc~0+)uh+3?`LlSTK@k4#9!DM^?w-f0RY<jPOk"
+)
 # Background-masked 28x28 RGB + 1-bit mask of the open Mimic chest (mouth, fangs, tongue, lid).
 MIMIC_TEMPLATE_B85 = (
     "c-pO%Eo|FB6vtmwsU4V<0|z`Q+6o2+3IYraPMRlKnn8epfx&?T2Mi1h3<9j~fPsOf83Ysr1Ox;G1"
@@ -162,6 +171,7 @@ class Screen:
     level: int | None = None
     cost: int | None = None
     mimic: tuple[int, int] | None = None
+    skip_30: bool = False
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -181,12 +191,39 @@ class Vision:
         self.reward_mixed = Image.fromarray(self.templates["reward_mixed"].astype(np.uint8)).convert("L")
         self.boss_kernels = self._build_boss_kernels()
         self.mimic_templates = self._build_mimic_templates()
+        self.gem_templates = load_gem_templates()
+        self.skip_30_mask = self._build_skip_30_mask()
         self.ad_closer = AdCloser(atlas_path)
         self.tower = None
         if upgrade_tower:
             from tower_vision import TowerVision
 
             self.tower = TowerVision()
+
+    @staticmethod
+    def _build_skip_30_mask():
+        raw = zlib.decompress(base64.b85decode(SKIP_30_MASK_B85))
+        total = SKIP_30_MASK_SHAPE[0] * SKIP_30_MASK_SHAPE[1]
+        return np.unpackbits(np.frombuffer(raw, dtype=np.uint8))[:total].reshape(SKIP_30_MASK_SHAPE).astype(bool)
+
+    def white_gems(self, rgb):
+        return read_white_gems(rgb, self.gem_templates)
+
+    def matches_skip_30(self, rgb):
+        button = rgb[316:415, 758:862]
+        red, green, blue = button[:, :, 0], button[:, :, 1], button[:, :, 2]
+        gold = (red > 180) & (green > 115) & (blue < 75) & (red - blue > 120)
+        if gold.mean() < 0.42:
+            return False
+        height, width = self.skip_30_mask.shape
+        for dy in range(-3, 4):
+            for dx in range(-3, 4):
+                sub = rgb[335 + dy:335 + dy + height, 774 + dx:774 + dx + width]
+                observed = (sub.min(axis=2) > 175) & (np.ptp(sub, axis=2) < 42)
+                denom = np.count_nonzero(observed | self.skip_30_mask)
+                if denom > 0 and np.count_nonzero(observed & self.skip_30_mask) / denom >= 0.65:
+                    return True
+        return False
 
     @staticmethod
     def _build_boss_kernels():
@@ -448,7 +485,12 @@ class Vision:
         if (hud or dim) and self.hp_empty(rgb, dim):
             return Screen("defeat")
         if hud and self.matches(rgb, "skip_title") and self.matches(rgb, "skip_close"):
-            return Screen("skip", (888, 216))
+            return Screen(
+                "skip",
+                SKIP_CLOSE_POINT,
+                gems=self.white_gems(rgb),
+                skip_30=self.matches_skip_30(rgb),
+            )
         if hud and self.matches(rgb, "upgrade"):
             if self.matches(rgb, "replay_100") and self.matches(rgb, "replay_80"):
                 return Screen("replay_menu", (857, 623))
@@ -512,8 +554,12 @@ class Vision:
 
 
 class Player:
-    def __init__(self, mode, report, tower=None, auto_captcha=False, *, watch_ads=True):
+    def __init__(self, mode, report, tower=None, auto_captcha=False, *, watch_ads=True, skip_waves=False):
+        if mode == "skip":
+            mode = "wave"
+            skip_waves = True
         self.mode = mode
+        self.skip_waves = skip_waves
         self.report = report
         self.tower = tower
         self.auto_captcha = auto_captcha
@@ -699,7 +745,15 @@ class Player:
         if self.acted or age < 0.20:
             return None
         if name == "skip":
-            action = Action("close Wave Skip", screen.point)
+            if self.skip_waves and self.mode == "wave":
+                if screen.gems is None and age < 0.65:
+                    return None
+                if screen.gems is not None and screen.gems >= SKIP_GEM_THRESHOLD and screen.skip_30:
+                    action = Action("select Wave Skip 30", SKIP_30_POINT)
+                else:
+                    action = Action("close Wave Skip", screen.point)
+            else:
+                action = Action("close Wave Skip", screen.point)
         elif name == "replay_menu" and self.mode == "replay":
             action = Action("start Replay 100%", screen.point)
         elif name in {"home", "gold"} and age >= 0.85:
@@ -748,13 +802,22 @@ def replay_frames(video):
 
 
 def play(args, target, report, journal):
+    skip_waves = args.skip or args.mode == "skip"
+    mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
     tower = TowerUpgrade(report, journal) if args.upgrade_tower else None
-    player = Player(args.mode, report, tower, args.auto_captcha, watch_ads=args.ads)
+    player = Player(
+        args.mode,
+        report,
+        tower,
+        args.auto_captcha,
+        watch_ads=args.ads,
+        skip_waves=skip_waves,
+    )
     vision = Vision(args.upgrade_tower)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
-        print(f"{prefix} mode={args.mode} source={args.video}", flush=True)
+        print(f"{prefix} mode={mode_label} source={args.video}", flush=True)
     else:
         connected_serial = ensure_adb_connected(
             target.adb,
@@ -766,7 +829,7 @@ def play(args, target, report, journal):
         target = replace(target, serial=connected_serial)
         frames = adb_frames(target.adb, target.serial, args.seconds)
         print(
-            f"{prefix} mode={args.mode} emulator={target.emulator} "
+            f"{prefix} mode={mode_label} emulator={target.emulator} "
             f"instance={target.instance} ({target.display_name!r}) source={target.serial}",
             flush=True,
         )
@@ -855,7 +918,9 @@ def _device_lock_key(target) -> str:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path, help="preview decisions on a recorded MP4")
-    parser.add_argument("--mode", choices=("wave", "replay"), default="wave")
+    parser.add_argument("--mode", choices=("wave", "replay", "skip"), default="wave")
+    parser.add_argument("--skip", action="store_true",
+                        help="select 30 WAVES on Wave Skip when white gems >= 30")
     parser.add_argument("--emulator", choices=("bluestacks", "ldplayer"),
                         help="target emulator (default: bluestacks, or ldplayer when --ldconsole is given)")
     parser.add_argument("--instance", help="BlueStacks 5 instance key or window title (e.g. Pie64, Pie64_1)")

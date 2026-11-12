@@ -6,7 +6,7 @@ import numpy as np
 from PIL import Image
 
 
-GEMS = (289, 2, 399, 36)
+GEMS = (283, 2, 399, 36)
 LEVEL = (316, 421, 456, 455)
 PRICE = (902, 480, 965, 517)
 UI = {
@@ -61,6 +61,43 @@ def normalize(glyph):
 
 def text_mask(rgb):
     return (rgb.min(axis=2) > 145) & (np.ptp(rgb, axis=2) < 48)
+
+
+def load_gem_templates():
+    with np.load(Path(__file__).with_name("tower_templates.npz"), allow_pickle=False) as atlas:
+        return atlas["gems"].astype(bool)
+
+
+def read_white_gems(rgb, gem_templates):
+    """Read only the white gem counter, ignoring any orange '+xxx' bonus suffix."""
+    box = crop(rgb, GEMS)
+    red, green, blue = box[:, :, 0], box[:, :, 1], box[:, :, 2]
+    orange = (red > 175) & (green > 80) & (blue < 55) & (red - blue > 130) & (red - green > 40)
+    orange_cols = np.flatnonzero(orange.sum(axis=0) >= 2)
+    has_orange = len(orange_cols) > 0
+    if has_orange:
+        cut = int(orange_cols[0])
+        if cut < 8:
+            return None
+        box = box[:, :cut]
+    if box.shape[1] < 8:
+        return None
+    digits = [g for g in glyphs(digit_mask(box, "gems")) if g.shape[0] >= 12 and g.shape[1] >= 7]
+    if not 1 <= len(digits) <= 5:
+        return None
+    min_h, min_w = (13, 8) if has_orange else (18, 10)
+    max_score, min_margin = (76, 15) if has_orange else (72, 17)
+    value = 0
+    for glyph in digits:
+        height, width = glyph.shape
+        if not (min_h <= height <= 28 and min_w <= width <= 21 and 1.05 <= height / width <= 2.45):
+            return None
+        scores = np.count_nonzero(gem_templates != normalize(glyph), axis=(2, 3)).min(axis=1)
+        best, second = np.argsort(scores)[:2]
+        if scores[best] > max_score or scores[second] - scores[best] < min_margin:
+            return None
+        value = value * 10 + int(best)
+    return value
 
 
 class TowerVision:
@@ -119,7 +156,7 @@ class TowerVision:
             layout = "hero"
         else:
             layout = None
-        return self._number(rgb, GEMS, "gems", 5), layout
+        return read_white_gems(rgb, self.numbers["gems"]), layout
 
     def panel(self, rgb):
         """Read a verified Lightning Castle detail or Castles list."""
@@ -128,7 +165,7 @@ class TowerVision:
         if (self._text_matches(rgb, "title", TITLE, TITLE_SHIFTS, 0.69)
                 and self._matches(rgb, "chain_lightning", TITLE_SHIFTS)
                 and self._matches(rgb, "detail_close")):
-            gems = self._number(rgb, GEMS, "gems", 5)
+            gems = read_white_gems(rgb, self.numbers["gems"])
             level = self._number(rgb, LEVEL, "level", 7)
             cost = None
             if self._matches(rgb, "button") and not self._matches(rgb, "bulk"):

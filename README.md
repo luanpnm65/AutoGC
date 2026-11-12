@@ -55,6 +55,9 @@ Nếu trên máy chỉ đang mở đúng một cửa sổ BlueStacks 5, tool t�
 
 # Bấm thật, bắt đầu bằng Replay 100%
 .\.venv\Scripts\python.exe autoplay.py --mode replay --tap
+
+# Bấm thật, bật chế độ Skip 30 WAVES khi kim cương trắng >= 30
+.\.venv\Scripts\python.exe autoplay.py --mode skip --tap
 ```
 
 ### Khi chạy nhiều cửa sổ cùng lúc (Multi-Instance)
@@ -85,7 +88,7 @@ Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riên
 | Màn chính | Tool nhận diện các nút từ ảnh mẫu và bấm **Battle** hoặc **Replay** theo chế độ đang chạy. Trong menu Replay, tool chọn ô **100%**. |
 | Đang đánh | Nhận diện cả thanh tiến trình **WAVE** lẫn thanh máu **BOSS** (dù đầy máu hay cạn máu), theo dõi thanh hồi kỹ năng của **2 đơn vị bên trái tháp** (ưu tiên bấm trước) cùng **9 ô Hero** trên tháp. Khi thanh xanh đầy, tool bấm một lần và chờ thanh rời trạng thái đầy trước khi bấm lại ở lần hồi tiếp theo. |
 | Rương **Mimic** | Ở mọi chế độ auto (`wave`, `replay`, màn thường, màn Boss hay màn chính), khi thấy rương **Mimic** mở miệng có bàn tay chỉ vào trên sân, tool ưu tiên bấm trực tiếp vào rương để nhận thưởng ngay. |
-| Hộp **Wave Skip** | Tool bấm **X** để đóng hộp và tiếp tục đánh. |
+| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--mode skip` (hoặc `--skip`), nếu số **kim cương trắng** trên thanh đầu màn hình từ **30 trở lên** (bỏ qua phần cộng thêm màu cam như `+500`), tool chọn **30 WAVES** thay vì đóng hộp; nếu dưới 30 thì bấm **X** như bình thường. |
 | **Victory** | Tool chờ về màn chính, ưu tiên hộp thưởng vàng nếu đã bật tự xem quảng cáo, rồi tiếp tục theo chế độ hiện tại. |
 | HP lâu đài về **0** | Tool nhận diện số 0 cùng thanh HP cạn, chuyển từ wave sang Replay và giữ Replay đến khi kết thúc phiên chạy. |
 | **CAPTCHA** | Tool tạm dừng đánh. Nếu bật `--auto-captcha`, tool thử chọn một lần. Khi cần giải tay, auto play chờ bạn xử lý rồi tiếp tục. |
