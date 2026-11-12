@@ -477,7 +477,8 @@ class Vision:
             return Screen("processing")
         if self.matches(rgb, "victory"):
             return Screen("victory")
-        if self.tower is not None and (panel := self.tower.panel(rgb)):
+        panel = self.tower.panel(rgb) if self.tower is not None else None
+        if panel is not None and panel[0] == "tower":
             kind, gems, level, cost = panel
             return Screen(kind, gems=gems, level=level, cost=cost)
         hud = self.matches(rgb, "hud")
@@ -498,6 +499,9 @@ class Vision:
                 return self.home_screen(rgb)
         if self.tower is not None and self.tower.is_home(rgb):
             return self.home_screen(rgb)
+        if panel is not None:
+            kind, gems, level, cost = panel
+            return Screen(kind, gems=gems, level=level, cost=cost)
         if hud and self.matches(rgb, "speed") and (
                 self.matches(rgb, "wave") or self.matches_boss(rgb)):
             ready = []
@@ -804,7 +808,8 @@ def replay_frames(video):
 def play(args, target, report, journal):
     skip_waves = args.skip or args.mode == "skip"
     mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
-    tower = TowerUpgrade(report, journal) if args.upgrade_tower else None
+    upgrade_target = "hero" if args.upgrade_hero else ("tower" if args.upgrade_tower else None)
+    tower = TowerUpgrade(report, journal, target=upgrade_target) if upgrade_target else None
     player = Player(
         args.mode,
         report,
@@ -813,7 +818,7 @@ def play(args, target, report, journal):
         watch_ads=args.ads,
         skip_waves=skip_waves,
     )
-    vision = Vision(args.upgrade_tower)
+    vision = Vision(upgrade_target is not None)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
@@ -936,13 +941,17 @@ def main():
                         help="open gold reward ads automatically (default: enabled)")
     parser.add_argument("--auto-captcha", action="store_true",
                         help="automatically start and try one selection per CAPTCHA (requires --tap)")
+    parser.add_argument("--upgrade-hero", action="store_true",
+                        help="upgrade the top-right Hero up to 50 levels when white gems >= 50")
     parser.add_argument("--upgrade-tower", action="store_true",
-                        help="spend gems on a batch of 30 Lightning Castle upgrades at 90+ gems")
+                        help="upgrade the Castle tower up to 50 levels when white gems >= 50")
     args = parser.parse_args()
     if args.video and args.tap:
         parser.error("--video is preview only")
     if args.auto_captcha and not args.tap:
         parser.error("--auto-captcha requires --tap")
+    if args.upgrade_hero and args.upgrade_tower:
+        parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
     if args.seconds < 0 or (args.index is not None and args.index < 0):
         parser.error("--seconds and --index must be nonnegative")
 
@@ -968,7 +977,9 @@ def main():
         if args.tap and target is not None:
             device_id = sha256(_device_lock_key(target).encode()).hexdigest()[:16]
             session_lock = Path(__file__).with_name(f".autoplay-{device_id}.lock")
-            if args.upgrade_tower:
+            if args.upgrade_hero:
+                journal = Path(__file__).with_name(f".hero-upgrade-{device_id}.json")
+            elif args.upgrade_tower:
                 journal = Path(__file__).with_name(f".tower-upgrade-{device_id}.json")
         conflict_label = f"{target.instance} ({target.serial})" if target else "device"
         with lock_journal(session_lock, f"Autoplay is already running with --tap on {conflict_label}."), lock_journal(journal):
