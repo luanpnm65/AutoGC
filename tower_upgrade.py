@@ -39,13 +39,13 @@ class Batch:
     def validate(self):
         if (type(self.gems) is not int or self.gems < 0
                 or type(self.level) is not int or self.level < 1
-                or type(self.confirmed) is not int or not 0 <= self.confirmed <= UPGRADE_COUNT
+                or type(self.confirmed) is not int or self.confirmed < 0
                 or type(self.restore_hero) is not bool
                 or type(self.done) is not bool
                 or type(self.closed) is not bool
                 or (self.pending_cost is not None
                     and (type(self.pending_cost) is not int or self.pending_cost not in VALID_COSTS))
-                or (self.pending_cost is not None and (self.confirmed == UPGRADE_COUNT or self.done))
+                or (self.pending_cost is not None and self.done)
                 or (self.closed and self.pending_cost is not None)):
             raise ValueError("Invalid upgrade journal")
 
@@ -74,24 +74,50 @@ def lock_journal(path, conflict="An upgrade process already owns this emulator j
 
 
 class TowerUpgrade:
-    def __init__(self, report, journal=None, *, target="tower"):
+    def __init__(
+        self,
+        report,
+        journal=None,
+        *,
+        target="tower",
+        gem_threshold=GEM_THRESHOLD,
+        upgrade_count=None,
+    ):
         if target not in {"hero", "tower"}:
             raise ValueError(f"Unsupported upgrade target: {target!r}")
+        if gem_threshold < 1:
+            raise ValueError("gem_threshold must be >= 1")
+        max_upgrades = upgrade_count if upgrade_count is not None else max(UPGRADE_COUNT, gem_threshold)
+        if max_upgrades < 1:
+            raise ValueError("upgrade_count must be >= 1")
         self.target = target
         self.label = "Hero" if target == "hero" else "Tower"
+        self.gem_threshold = gem_threshold
+        self.upgrade_count = max_upgrades
         self.report = report
         self.journal = journal
         self.batch = None
+        self.recovered_pending = False
         if journal is not None and journal.exists():
             data = json.loads(journal.read_text(encoding="utf-8"))
             if data is not None:
                 try:
-                    self.batch = Batch(**data)
-                except TypeError as exc:
-                    raise ValueError("Invalid upgrade journal") from exc
-                self.batch.validate()
-                if self.batch.confirmed >= UPGRADE_COUNT or self.batch.closed:
-                    self.batch.done = True
+                    batch = Batch(**data)
+                    batch.validate()
+                except (TypeError, ValueError):
+                    batch = None
+                if batch is not None:
+                    if not batch.closed and batch.pending_cost is None and not batch.done:
+                        # A previous run exited cleanly or stopped with no tap in flight;
+                        # start fresh so manual gameplay in between never causes a mismatch.
+                        batch = None
+                    else:
+                        if batch.confirmed >= self.upgrade_count or batch.closed:
+                            batch.done = True
+                        self.recovered_pending = batch.pending_cost is not None
+                self.batch = batch
+                if self.batch is None:
+                    self.save()
         self.active = self.batch is not None and not self.batch.closed
         self.restore_hero = self.batch is not None and self.batch.restore_hero
         self.rearmed_by_battle = False
@@ -144,20 +170,23 @@ class TowerUpgrade:
             if self.batch is not None:
                 rearmed = (
                     self.rearmed_by_battle
-                    or (name in {"home", "gold"} and stable and gems is not None and gems < GEM_THRESHOLD)
+                    or (name in {"home", "gold"} and stable and gems is not None and gems < self.gem_threshold)
                 )
-                if self.batch.gems >= GEM_THRESHOLD and not rearmed:
+                if self.batch.gems >= self.gem_threshold and not rearmed:
                     return False, None
                 self.batch = None
                 self.restore_hero = False
                 self.rearmed_by_battle = False
                 self.save()
             if (name not in {"home", "tower"} or not stable
-                    or gems is None or gems < GEM_THRESHOLD):
+                    or gems is None or gems < self.gem_threshold):
                 return False, None
             self.active = True
             self.rearmed_by_battle = False
-            self.report(time, f"{self.label} upgrade triggered at {gems} white gems")
+            self.report(
+                time,
+                f"{self.label} upgrade triggered at {gems} white gems (threshold {self.gem_threshold})",
+            )
 
         if self.navigation:
             started, expected, expected_layout = self.navigation
@@ -173,10 +202,17 @@ class TowerUpgrade:
         if not stable:
             return self.wait_for_reading(time, f"{self.label} upgrade stopped: screen did not stabilize.")
 
-        if self.batch is not None and (self.batch.done or self.batch.confirmed >= UPGRADE_COUNT):
+        if self.batch is not None and (self.batch.done or self.batch.confirmed >= self.upgrade_count):
             return self.finish(time, name, layout)
 
         if name == "home":
+            if self.recovered_pending and gems is not None and gems < self.gem_threshold:
+                self.batch = None
+                self.active = False
+                self.restore_hero = False
+                self.recovered_pending = False
+                self.save()
+                return False, None
             if self.target == "hero":
                 if layout == "castle":
                     return self.navigate(time, "restore hero slots", EXIT_LAYER_VIEW, "home", "hero")
@@ -197,10 +233,22 @@ class TowerUpgrade:
                 time, f"{self.label} upgrade stopped: open the verified {self.label} detail panel."
             )
 
+        if self.batch is not None and self.recovered_pending:
+            expected_after = (self.batch.gems - self.batch.pending_cost, self.batch.level + 1)
+            expected_before = (self.batch.gems, self.batch.level)
+            if (gems, level) not in (expected_after, expected_before):
+                # User played or upgraded manually after the previous crash; reset to live state.
+                self.batch = None
+            elif (gems, level) == expected_before:
+                self.batch.pending_cost = None
+                self.save()
+            self.recovered_pending = False
+
         if self.batch is None:
-            if gems < GEM_THRESHOLD:
-                raise RuntimeError(
-                    f"{self.label} upgrade stopped: white gem balance fell below {GEM_THRESHOLD} before the batch."
+            if gems < self.gem_threshold:
+                return self._complete_batch(
+                    time, name, layout,
+                    f"{self.label} upgrade skipped ({gems} white gems < {self.gem_threshold}): closing menu",
                 )
             if cost not in VALID_COSTS:
                 return self.wait_for_reading(
@@ -218,7 +266,7 @@ class TowerUpgrade:
         if batch.pending_cost is not None:
             if (gems, level) != (batch.gems - batch.pending_cost, batch.level + 1):
                 return self.wait_for_reading(
-                    time, f"{self.label} upgrade stopped at {batch.confirmed}/{UPGRADE_COUNT}: "
+                    time, f"{self.label} upgrade stopped at {batch.confirmed}/{self.upgrade_count}: "
                     "last tap is unconfirmed; inspect the level and gem balance before restarting."
                 )
             batch.gems, batch.level = gems, level
@@ -227,15 +275,16 @@ class TowerUpgrade:
             self.save()
             self.report(
                 time,
-                f"{self.label} {batch.confirmed}/{UPGRADE_COUNT} confirmed (level {level}, {gems} white gems)",
+                f"{self.label} {batch.confirmed}/{self.upgrade_count} confirmed "
+                f"(level {level}, {gems} white gems)",
             )
             self.unverified_since = None
-            if batch.confirmed >= UPGRADE_COUNT:
+            if batch.confirmed >= self.upgrade_count:
                 return self._complete_batch(time, name, layout)
             if gems == 0 or (cost in VALID_COSTS and gems < cost):
                 return self._complete_batch(
                     time, name, layout,
-                    f"{self.label} stopped at {batch.confirmed}/{UPGRADE_COUNT} "
+                    f"{self.label} stopped at {batch.confirmed}/{self.upgrade_count} "
                     f"({gems} white gems remaining): closing menu",
                 )
 
@@ -246,7 +295,7 @@ class TowerUpgrade:
         if gems == 0 or (cost in VALID_COSTS and gems < cost):
             return self._complete_batch(
                 time, name, layout,
-                f"{self.label} stopped at {batch.confirmed}/{UPGRADE_COUNT} "
+                f"{self.label} stopped at {batch.confirmed}/{self.upgrade_count} "
                 f"({gems} white gems remaining): closing menu",
             )
         if cost not in VALID_COSTS:
@@ -257,7 +306,7 @@ class TowerUpgrade:
         self.unverified_since = None
         unit = "gem" if cost == 1 else "gems"
         return True, Action(
-            f"upgrade {self.label} {batch.confirmed + 1}/{UPGRADE_COUNT} ({cost} {unit})",
+            f"upgrade {self.label} {batch.confirmed + 1}/{self.upgrade_count} ({cost} {unit})",
             LV_UP,
             (gems, level, cost),
         )
@@ -268,7 +317,7 @@ class TowerUpgrade:
         gems, level, cost = action.charge
         batch = self.batch
         if (batch is None or batch.pending_cost is not None or batch.done
-                or batch.confirmed >= UPGRADE_COUNT
+                or batch.confirmed >= self.upgrade_count
                 or (gems, level) != (batch.gems, batch.level) or cost not in VALID_COSTS):
             raise RuntimeError(f"{self.label} upgrade stopped: journal and planned tap disagree.")
         batch.pending_cost = cost

@@ -98,24 +98,25 @@ Tool lấy ảnh qua ADB, chuẩn hóa ảnh về 1280 × 720 để đối chi�
 
 ### Nâng Hero hoặc Tháp bằng kim cương
 
-Tính năng mặc định tắt. Dùng `--upgrade-hero` (nâng Hero gắn ở ô góc trên bên phải của lâu đài) hoặc `--upgrade-tower` (nâng tầng tháp thứ hai từ dưới lên) kết hợp cùng bất kỳ chế độ đánh nào (`wave`, `skip`, `replay`).
+Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` (nâng Hero gắn ở ô góc trên bên phải của lâu đài) hoặc `--upgrade-tower [SỐ_KC]` (nâng tầng tháp thứ hai từ dưới lên) kết hợp cùng bất kỳ chế độ đánh nào (`wave`, `skip`, `replay`). Nếu không truyền số theo sau thì mặc định kích hoạt ở mốc **50 kim cương trắng**.
 
 ```powershell
-# Chạy Wave và tự nâng Hero góc trên bên phải khi kim cương trắng >= 50
+# Chạy Wave và tự nâng Hero góc trên bên phải khi kim cương trắng >= 50 (mặc định)
 .\.venv\Scripts\python.exe autoplay.py --tap --upgrade-hero
 
-# Chạy Replay trên một instance cụ thể và tự nâng Hero
-.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-hero
+# Tự chọn mốc kim cương trắng để bắt đầu nâng (ví dụ đủ 30 hoặc 80 kim cương trắng là nâng)
+.\.venv\Scripts\python.exe autoplay.py --mode replay --tap --upgrade-hero 30
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-hero 80
 
-# Chạy Wave và tự nâng Tháp khi kim cương trắng >= 50
-.\.venv\Scripts\python.exe autoplay.py --tap --upgrade-tower
+# Chạy Wave và tự nâng Tháp khi kim cương trắng >= 60
+.\.venv\Scripts\python.exe autoplay.py --tap --upgrade-tower 60
 ```
 
-1. Khi thấy **từ 50 kim cương trắng trở lên** ở màn chính (tự bỏ qua phần kim cương cộng thêm màu cam như `+500`):
+1. Khi thấy số **kim cương trắng đạt mốc đã chọn** (mặc định `50`, tự bỏ qua phần kim cương cộng thêm màu cam như `+500`):
    - Với `--upgrade-hero`: tool bấm vào **ô Hero góc trên bên phải** `(461, 92)` để mở bảng thông tin của bất kỳ Hero nào đang gắn tại ô đó.
    - Với `--upgrade-tower`: tool bấm ô chuyển tầng tháp `(380, 457)` rồi mở ô tầng tháp thứ hai từ dưới lên `(380, 366)`.
-2. Tool đọc cấp hiện tại và giá kim cương trên nút **LV UP** thường (`💎 1`, `2` hoặc `3` kim cương), kiểm tra lại trước mỗi cú bấm.
-3. Sau mỗi lần bấm, tool xác nhận cấp tăng đúng 1 và số kim cương trắng giảm đúng giá vừa đọc. Đợt nâng kết thúc khi đủ **50 cấp**, hoặc dừng sớm ngay khi số kim cương trắng còn lại nhỏ hơn giá nâng tiếp theo để **không bao giờ trừ lẹm vào phần kim cương cam (`+500`)**.
+2. Tool đọc cấp hiện tại và giá kim cương trên nút **LV UP** (`💎 1`, `2` hoặc `3` kim cương) tại `(896, 470)`, tiếp tục nâng bình thường kể cả khi thanh `LV UP +10 / +100 / +1000` bật thêm ở phía dưới sau 10 lần bấm.
+3. Sau mỗi lần bấm, tool xác nhận cấp tăng đúng 1 và số kim cương trắng giảm đúng giá vừa đọc. Đợt nâng kết thúc khi đủ số cấp mục tiêu (`max(50, mốc kim cương)`, hoặc tùy chỉnh bằng `--upgrade-levels`), hoặc dừng sớm ngay khi số kim cương trắng còn lại nhỏ hơn giá nâng tiếp theo để **không bao giờ trừ lẹm vào phần kim cương cam (`+500`)**.
 4. Tool bấm nút **X** `(994, 160)` để đóng bảng thông tin Hero/Tháp, bấm tiếp nút **X** `(1247, 76)` để đóng danh sách Hero/Tháp bên phải (khôi phục lại giao diện ô Hero nếu vừa nâng Tháp), rồi tiếp tục đánh theo chế độ đang chọn.
 
 ### Quảng cáo thưởng vàng

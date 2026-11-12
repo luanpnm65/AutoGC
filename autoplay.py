@@ -26,7 +26,7 @@ from emulator import (
     is_ad_activity,
     resolve_target,
 )
-from tower_upgrade import Action, TowerUpgrade, lock_journal
+from tower_upgrade import Action, GEM_THRESHOLD, TowerUpgrade, lock_journal
 from tower_vision import load_gem_templates, read_white_gems
 from windows_video import read_video
 
@@ -808,8 +808,26 @@ def replay_frames(video):
 def play(args, target, report, journal):
     skip_waves = args.skip or args.mode == "skip"
     mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
-    upgrade_target = "hero" if args.upgrade_hero else ("tower" if args.upgrade_tower else None)
-    tower = TowerUpgrade(report, journal, target=upgrade_target) if upgrade_target else None
+    if args.upgrade_hero is not None:
+        upgrade_target = "hero"
+        gem_threshold = args.upgrade_gems if args.upgrade_gems is not None else args.upgrade_hero
+    elif args.upgrade_tower is not None:
+        upgrade_target = "tower"
+        gem_threshold = args.upgrade_gems if args.upgrade_gems is not None else args.upgrade_tower
+    else:
+        upgrade_target = None
+        gem_threshold = GEM_THRESHOLD
+    tower = (
+        TowerUpgrade(
+            report,
+            journal,
+            target=upgrade_target,
+            gem_threshold=gem_threshold,
+            upgrade_count=args.upgrade_levels,
+        )
+        if upgrade_target
+        else None
+    )
     player = Player(
         args.mode,
         report,
@@ -941,17 +959,32 @@ def main():
                         help="open gold reward ads automatically (default: enabled)")
     parser.add_argument("--auto-captcha", action="store_true",
                         help="automatically start and try one selection per CAPTCHA (requires --tap)")
-    parser.add_argument("--upgrade-hero", action="store_true",
-                        help="upgrade the top-right Hero up to 50 levels when white gems >= 50")
-    parser.add_argument("--upgrade-tower", action="store_true",
-                        help="upgrade the Castle tower up to 50 levels when white gems >= 50")
+    parser.add_argument("--upgrade-hero", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
+                        help="upgrade the top-right Hero when white gems >= GEMS (default: 50)")
+    parser.add_argument("--upgrade-tower", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
+                        help="upgrade the Castle tower when white gems >= GEMS (default: 50)")
+    parser.add_argument("--upgrade-gems", type=int, metavar="GEMS",
+                        help="white-gem threshold override for --upgrade-hero / --upgrade-tower")
+    parser.add_argument("--upgrade-levels", type=int, metavar="LEVELS",
+                        help="max levels per upgrade batch (default: max(50, threshold))")
     args = parser.parse_args()
     if args.video and args.tap:
         parser.error("--video is preview only")
     if args.auto_captcha and not args.tap:
         parser.error("--auto-captcha requires --tap")
-    if args.upgrade_hero and args.upgrade_tower:
+    if args.upgrade_hero is not None and args.upgrade_tower is not None:
         parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
+    if (args.upgrade_gems is not None or args.upgrade_levels is not None) and (
+            args.upgrade_hero is None and args.upgrade_tower is None):
+        parser.error("--upgrade-gems and --upgrade-levels require --upgrade-hero or --upgrade-tower")
+    for flag_name, value in (
+        ("--upgrade-hero", args.upgrade_hero),
+        ("--upgrade-tower", args.upgrade_tower),
+        ("--upgrade-gems", args.upgrade_gems),
+        ("--upgrade-levels", args.upgrade_levels),
+    ):
+        if value is not None and value < 1:
+            parser.error(f"{flag_name} must be >= 1")
     if args.seconds < 0 or (args.index is not None and args.index < 0):
         parser.error("--seconds and --index must be nonnegative")
 
@@ -977,9 +1010,9 @@ def main():
         if args.tap and target is not None:
             device_id = sha256(_device_lock_key(target).encode()).hexdigest()[:16]
             session_lock = Path(__file__).with_name(f".autoplay-{device_id}.lock")
-            if args.upgrade_hero:
+            if args.upgrade_hero is not None:
                 journal = Path(__file__).with_name(f".hero-upgrade-{device_id}.json")
-            elif args.upgrade_tower:
+            elif args.upgrade_tower is not None:
                 journal = Path(__file__).with_name(f".tower-upgrade-{device_id}.json")
         conflict_label = f"{target.instance} ({target.serial})" if target else "device"
         with lock_journal(session_lock, f"Autoplay is already running with --tap on {conflict_label}."), lock_journal(journal):

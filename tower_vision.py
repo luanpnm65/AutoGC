@@ -193,7 +193,7 @@ class TowerVision:
             gems = read_white_gems(rgb, self.numbers["gems"])
             level = self._number(rgb, LEVEL, "level", 7, BOUNCE_SHIFTS)
             cost = None
-            if self._matches(rgb, "button", DETAIL_SHIFTS) and not self._matches(rgb, "bulk", DETAIL_SHIFTS):
+            if self._matches(rgb, "button", DETAIL_SHIFTS):
                 value = self._number(rgb, PRICE, "cost", 1, BOUNCE_SHIFTS)
                 if value in (1, 2, 3):
                     cost = value
