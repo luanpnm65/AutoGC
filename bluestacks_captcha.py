@@ -89,7 +89,8 @@ def matching_game_frame(adb, serial, captured_board):
     board = board_image(frame)
     gray = np.asarray(board.convert("L"), dtype=np.float32)
     captured = np.asarray(captured_board.convert("L"), dtype=np.float32)
-    if not upright_layout(gray) or np.mean(np.abs(gray - captured)) > 5:
+    centered_diff = np.mean(np.abs((gray - gray.mean()) - (captured - captured.mean())))
+    if not upright_layout(gray) or centered_diff > 8 or abs(float(gray.mean() - captured.mean())) > 18:
         raise RuntimeError("The selected device no longer shows the same cup layout.")
     return frame, gem_position(board)
 
@@ -130,14 +131,14 @@ def keep_window_round(frames):
 
 
 def solve_from_adb_recording(adb, serial, start_screen):
-    # Record inside Android, where occluding Windows apps cannot hide the game.
+    # Record inside Android at native resolution (~60 FPS), completely avoiding
+    # emulator keymapping overlays (B/N/M), GPU black frames, and window occlusion.
     initial = game_frame(adb, serial)
     initial_board = board_image(initial)
     verify_start(initial, gem_position(initial_board), start_screen)
     remote = f"/data/local/tmp/growcastle-captcha-{uuid4().hex}.mp4"
     recording = subprocess.Popen(
-        [str(adb), "-s", serial, "shell", "screenrecord", "--size", "960x540",
-         "--time-limit", "7", remote],
+        [str(adb), "-s", serial, "shell", "screenrecord", "--time-limit", "6", remote],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         creationflags=_NO_WINDOW,
@@ -146,12 +147,15 @@ def solve_from_adb_recording(adb, serial, start_screen):
     selected = False
     tapped_start = False
     try:
-        deadline = monotonic() + 2
+        started_wait = monotonic()
+        deadline = started_wait + 2.2
         while recording.poll() is None and monotonic() < deadline:
             try:
-                size = adb_run(adb, serial, "shell", "stat", "-c", "%s", remote, timeout=2)
-                if size.strip().isdigit() and int(size) > 0:
-                    break
+                size_text = adb_run(adb, serial, "shell", "stat", "-c", "%s", remote, timeout=2).decode(errors="ignore").strip()
+                if size_text.isdigit():
+                    size_val = int(size_text)
+                    if size_val > 0 or (monotonic() - started_wait >= 0.55 and recording.poll() is None):
+                        break
             except subprocess.CalledProcessError:
                 pass
             sleep(0.1)
@@ -164,16 +168,21 @@ def solve_from_adb_recording(adb, serial, start_screen):
             raise _RecordingUnavailableError("ADB screen recording ended before CAPTCHA Start.")
         tap_point(adb, serial, frame, START_POINT)
         tapped_start = True
-        print("CAPTCHA: started during ADB screen recording.", flush=True)
+        print("CAPTCHA: started during 60 FPS ADB screen recording.", flush=True)
         _, stderr = recording.communicate(timeout=9)
         if recording.returncode:
             raise RuntimeError(stderr.decode(errors="replace").strip() or "ADB screen recording failed.")
 
-        data = adb_run(adb, serial, "exec-out", "cat", remote)
         with NamedTemporaryFile(suffix=".mp4", delete=False) as target:
             local = Path(target.name)
-            target.write(data)
-        detector = Detector(sample_interval=0.017)
+        try:
+            adb_run(adb, serial, "pull", remote, str(local), timeout=10)
+        except subprocess.SubprocessError:
+            local.write_bytes(adb_run(adb, serial, "exec-out", "cat", remote, timeout=10))
+        if not local.exists() or local.stat().st_size < 1024:
+            raise RuntimeError("ADB screen recording produced an empty video.")
+
+        detector = Detector(sample_interval=0.012)
         video = read_video(local)
         try:
             for _, time, image in video:
@@ -411,13 +420,20 @@ def watch_target(target: EmulatorTarget, duration: float, tap: bool, start_scree
         )
         target = replace(target, serial=connected_serial)
 
-    try:
-        hwnd = target_window_handle(target)
-    except RuntimeError:
-        if start_screen is not None and (not duration or duration >= 12):
-            print("CAPTCHA: window capture unavailable; using ADB capture.", flush=True)
+    if start_screen is not None and (not duration or duration >= 9):
+        try:
             return solve_from_adb(target.adb, target.serial, start_screen)
-        raise
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as adb_exc:
+            # If the START button is still visible, fall back to direct window capture.
+            try:
+                still_ready = start_screen(game_frame(target.adb, target.serial))
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                still_ready = False
+            if not still_ready:
+                raise
+            print(f"CAPTCHA: ADB capture fallback ({adb_exc}); trying window capture.", flush=True)
+
+    hwnd = target_window_handle(target)
 
     detector = Detector(sample_interval=0.025 if start_screen is not None else 0.043)
     frames = Queue(maxsize=CAPTURE_FPS * 5)
@@ -480,9 +496,6 @@ def watch_target(target: EmulatorTarget, duration: float, tap: bool, start_scree
         capture.join(timeout=2)
         if round_frames and not selected:
             keep_window_round(round_frames)
-    if start_screen is not None and not started and (not duration or duration >= 12):
-        print("CAPTCHA: window capture unavailable; using ADB capture.", flush=True)
-        return solve_from_adb(target.adb, target.serial, start_screen)
     print(f"Stopped after {rounds} completed challenge(s).", flush=True)
     return False
 

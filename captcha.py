@@ -190,25 +190,30 @@ def select_final(observations, initial_slot, end_time):
     # match the upright template again, spatial continuity carries their identity.
     votes = {slot: {} for slot in range(len(SLOTS))}
     individual = {slot: {} for slot in range(len(SLOTS))}
-    late = start_time + 0.30 * (end_time - start_time)
+    late = start_time + 0.28 * (end_time - start_time)
     for i, obs in enumerate(observations):
         if obs.time < late:
             continue
         for seed in obs.outliers(0.71):
             current = seed
+            vel = np.zeros(2, dtype=np.float64)
             last_seen = obs.time
             for later in observations[i + 1:]:
-                if later.time - last_seen > 0.16:
+                dt = later.time - last_seen
+                if dt > 0.18:
                     break
                 if later.poses:
-                    nearest = min(later.poses, key=lambda p: p.distance(current.position))
-                    if nearest.distance(current.position) <= 10:
+                    predicted = np.array(current.position, dtype=np.float64) + 0.55 * vel * dt
+                    nearest = min(later.poses, key=lambda p: p.distance(predicted))
+                    if nearest.distance(predicted) <= 12 and nearest.distance(current.position) <= 14:
+                        if dt > 1e-3:
+                            vel = 0.6 * vel + 0.4 * (np.subtract(nearest.position, current.position) / dt)
                         current = nearest
                         last_seen = later.time
-            if end_time - last_seen > 0.16:
+            if end_time - last_seen > 0.18:
                 continue
             slot = int(np.argmin(np.linalg.norm(SLOTS - current.position, axis=1)))
-            if current.distance(SLOTS[slot]) <= 8:
+            if current.distance(SLOTS[slot]) <= 9:
                 if seed.score >= 0.75:
                     votes[slot][i] = max(seed.score, votes[slot].get(i, 0))
                 if sum(angle_distance(seed.angle, p.angle) <= 15 for p in obs.poses) == 1:
@@ -235,9 +240,13 @@ def select_final(observations, initial_slot, end_time):
 
     # Multiple ordinary cups can share a secondary rotation. In an ambiguous
     # round, require an independently rotating path along the direction the
-    # verified entry cup began moving.
+    # verified entry cup began moving (allowing slight spring overshoot near settle).
     candidates = []
-    early_delta = np.subtract(early[-1].position, early[0].position)
+    early_delta = (
+        np.subtract(early[-1].position, early[0].position)
+        if len(early) >= 2
+        else np.subtract(early[0].position, initial)
+    )
     for slot, seeds in individual.items():
         displacement = SLOTS[slot] - initial
         axis = int(np.argmax(np.abs(displacement)))
@@ -248,16 +257,16 @@ def select_final(observations, initial_slot, end_time):
         for i, pose in seeds.items():
             offset = np.subtract(pose.position, initial)
             progress = offset[axis] / displacement[axis]
-            if not 0.3 <= progress <= 1.15 or abs(offset[1 - axis] - progress * displacement[1 - axis]) > 27:
+            if not 0.25 <= progress <= 1.48 or abs(offset[1 - axis] - min(progress, 1.0) * displacement[1 - axis]) > 27:
                 continue
             if not track or pose.position != track[-1][1].position or pose.angle != track[-1][1].angle:
                 track.append((observations[i].time, pose))
-        if (len(track) >= 5 and track[-1][0] - track[0][0] >= 0.13
+        if (len(track) >= 4 and track[-1][0] - track[0][0] >= 0.12
                 and len({pose.angle for _, pose in track}) >= 4
                 and np.mean([pose.score for _, pose in track]) >= 0.74
                 and sum(pose.score >= 0.78 for _, pose in track) >= 2
-                and all(t2 - t1 <= 0.13 and p2.distance(p1.position) <= 12
-                        and (p2.position[axis] - p1.position[axis]) * direction >= -3
+                and all(t2 - t1 <= 0.18 and p2.distance(p1.position) <= 15
+                        and (p2.position[axis] - p1.position[axis]) * direction >= -5
                         for (t1, p1), (t2, p2) in zip(track, track[1:]))):
             candidates.append((slot, len(track)))
     if len(candidates) == 1:
@@ -340,7 +349,7 @@ def format_result(result):
 
 
 def analyze_video(path):
-    detector = Detector(sample_interval=0.017)
+    detector = Detector(sample_interval=0.012)
     if Path(path).suffix.lower() == ".npz":
         with np.load(path, allow_pickle=False) as recording:
             times, boards = recording["times"], recording["boards"]
