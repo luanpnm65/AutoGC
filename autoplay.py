@@ -26,7 +26,7 @@ from emulator import (
     is_ad_activity,
     resolve_target,
 )
-from tower_upgrade import Action, TowerUpgrade, lock_journal
+from tower_upgrade import Action, GEM_THRESHOLD, TowerUpgrade, lock_journal
 from tower_vision import load_gem_templates, read_white_gems
 from windows_video import read_video
 
@@ -170,6 +170,7 @@ class Screen:
     layout: str | None = None
     level: int | None = None
     cost: int | None = None
+    bulk_cost: int | None = None
     mimic: tuple[int, int] | None = None
     skip_30: bool = False
     raw_point: bool = False
@@ -477,9 +478,10 @@ class Vision:
             return Screen("processing")
         if self.matches(rgb, "victory"):
             return Screen("victory")
-        if self.tower is not None and (panel := self.tower.panel(rgb)):
-            kind, gems, level, cost = panel
-            return Screen(kind, gems=gems, level=level, cost=cost)
+        panel = self.tower.panel(rgb) if self.tower is not None else None
+        if panel is not None and panel[0] == "tower":
+            kind, gems, level, cost, bulk_cost = panel
+            return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         hud = self.matches(rgb, "hud")
         dim = not hud and self.matches(rgb, "hud_dim")
         if (hud or dim) and self.hp_empty(rgb, dim):
@@ -498,6 +500,9 @@ class Vision:
                 return self.home_screen(rgb)
         if self.tower is not None and self.tower.is_home(rgb):
             return self.home_screen(rgb)
+        if panel is not None:
+            kind, gems, level, cost, bulk_cost = panel
+            return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         if hud and self.matches(rgb, "speed") and (
                 self.matches(rgb, "wave") or self.matches_boss(rgb)):
             ready = []
@@ -804,7 +809,26 @@ def replay_frames(video):
 def play(args, target, report, journal):
     skip_waves = args.skip or args.mode == "skip"
     mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
-    tower = TowerUpgrade(report, journal) if args.upgrade_tower else None
+    if args.upgrade_hero is not None:
+        upgrade_target = "hero"
+        gem_threshold = args.upgrade_gems if args.upgrade_gems is not None else args.upgrade_hero
+    elif args.upgrade_tower is not None:
+        upgrade_target = "tower"
+        gem_threshold = args.upgrade_gems if args.upgrade_gems is not None else args.upgrade_tower
+    else:
+        upgrade_target = None
+        gem_threshold = GEM_THRESHOLD
+    tower = (
+        TowerUpgrade(
+            report,
+            journal,
+            target=upgrade_target,
+            gem_threshold=gem_threshold,
+            upgrade_count=args.upgrade_levels,
+        )
+        if upgrade_target
+        else None
+    )
     player = Player(
         args.mode,
         report,
@@ -813,7 +837,7 @@ def play(args, target, report, journal):
         watch_ads=args.ads,
         skip_waves=skip_waves,
     )
-    vision = Vision(args.upgrade_tower)
+    vision = Vision(upgrade_target is not None)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
@@ -888,11 +912,14 @@ def play(args, target, report, journal):
             else:
                 if args.tap:
                     if action.charge is not None:
+                        expected_gems, expected_level, expected_cost, step_levels = action.charge
                         raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
                         with Image.open(BytesIO(raw)) as check:
                             latest = vision.classify(viewport(check))
+                            observed_cost = latest.bulk_cost if step_levels == 10 else latest.cost
                             if (check.size != original.size or latest.name != "tower"
-                                    or (latest.gems, latest.level, latest.cost) != action.charge
+                                    or (latest.gems, latest.level, observed_cost)
+                                    != (expected_gems, expected_level, expected_cost)
                                     or foreground_activity(target.adb, target.serial) != activity):
                                 tower.suspend()
                                 continue
@@ -936,13 +963,32 @@ def main():
                         help="open gold reward ads automatically (default: enabled)")
     parser.add_argument("--auto-captcha", action="store_true",
                         help="automatically start and try one selection per CAPTCHA (requires --tap)")
-    parser.add_argument("--upgrade-tower", action="store_true",
-                        help="spend gems on a batch of 30 Lightning Castle upgrades at 90+ gems")
+    parser.add_argument("--upgrade-hero", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
+                        help="upgrade the top-right Hero when white gems >= GEMS (default: 50)")
+    parser.add_argument("--upgrade-tower", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
+                        help="upgrade the Castle tower when white gems >= GEMS (default: 50)")
+    parser.add_argument("--upgrade-gems", type=int, metavar="GEMS",
+                        help="white-gem threshold override for --upgrade-hero / --upgrade-tower")
+    parser.add_argument("--upgrade-levels", type=int, metavar="LEVELS",
+                        help="max levels per upgrade batch (default: max(50, threshold))")
     args = parser.parse_args()
     if args.video and args.tap:
         parser.error("--video is preview only")
     if args.auto_captcha and not args.tap:
         parser.error("--auto-captcha requires --tap")
+    if args.upgrade_hero is not None and args.upgrade_tower is not None:
+        parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
+    if (args.upgrade_gems is not None or args.upgrade_levels is not None) and (
+            args.upgrade_hero is None and args.upgrade_tower is None):
+        parser.error("--upgrade-gems and --upgrade-levels require --upgrade-hero or --upgrade-tower")
+    for flag_name, value in (
+        ("--upgrade-hero", args.upgrade_hero),
+        ("--upgrade-tower", args.upgrade_tower),
+        ("--upgrade-gems", args.upgrade_gems),
+        ("--upgrade-levels", args.upgrade_levels),
+    ):
+        if value is not None and value < 1:
+            parser.error(f"{flag_name} must be >= 1")
     if args.seconds < 0 or (args.index is not None and args.index < 0):
         parser.error("--seconds and --index must be nonnegative")
 
@@ -968,7 +1014,9 @@ def main():
         if args.tap and target is not None:
             device_id = sha256(_device_lock_key(target).encode()).hexdigest()[:16]
             session_lock = Path(__file__).with_name(f".autoplay-{device_id}.lock")
-            if args.upgrade_tower:
+            if args.upgrade_hero is not None:
+                journal = Path(__file__).with_name(f".hero-upgrade-{device_id}.json")
+            elif args.upgrade_tower is not None:
                 journal = Path(__file__).with_name(f".tower-upgrade-{device_id}.json")
         conflict_label = f"{target.instance} ({target.serial})" if target else "device"
         with lock_journal(session_lock, f"Autoplay is already running with --tap on {conflict_label}."), lock_journal(journal):

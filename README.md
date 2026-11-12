@@ -1,6 +1,6 @@
 # Grow Castle Auto cho BlueStacks 5 (hỗ trợ cả LDPlayer 9)
 
-Tool Python đọc màn hình Grow Castle để đánh wave tiếp theo hoặc Replay, kích hoạt kỹ năng đã hồi, nâng Lightning Castle bằng kim cương và xem quảng cáo thưởng vàng. Với `--auto-captcha`, auto play tự thử giải CAPTCHA rồi tiếp tục khi nhận ra màn game đã trở lại. Tool mặc định chạy cho **BlueStacks 5** (kể cả cài ổ đĩa tùy chỉnh và chạy nhiều cửa sổ **Multi-Instance** cùng lúc) và vẫn giữ tương thích với **LDPlayer 9**.
+Tool Python đọc màn hình Grow Castle để đánh wave tiếp theo, Skip 30 hoặc Replay, kích hoạt kỹ năng đã hồi, tự nâng cấp Hero hoặc Tháp bằng kim cương và xem quảng cáo thưởng vàng. Với `--auto-captcha`, auto play tự thử giải CAPTCHA rồi tiếp tục khi nhận ra màn game đã trở lại. Tool mặc định chạy cho **BlueStacks 5** (kể cả cài ổ đĩa tùy chỉnh và chạy nhiều cửa sổ **Multi-Instance** cùng lúc) và vẫn giữ tương thích với **LDPlayer 9**.
 
 ## 1. Cài đặt
 
@@ -79,7 +79,7 @@ Mở một cửa sổ PowerShell riêng cho mỗi giả lập cần chạy và c
 
 Nếu bạn dùng bản BlueStacks 5 di động không ghi Registry, có thể chỉ định trực tiếp đường dẫn bằng `--adb "D:\BlueStacks_nxt\HD-Adb.exe"` và `--conf "D:\BlueStacks_nxt\bluestacks.conf"`.
 
-Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riêng (`.autoplay-*.lock`) và nhật ký nâng tháp riêng (`.tower-upgrade-*.json`) theo tên instance nên nhiều phiên chạy song song không xung đột nhau, kể cả khi BlueStacks đổi cổng ADB động sau lần khởi động lại. Trước mỗi cú bấm, tool đều xác nhận Grow Castle đang là ứng dụng hiển thị trên thiết bị đó. Dùng `Ctrl+C` để dừng hoặc thêm `--seconds 60` để giới hạn thời gian chạy.
+Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riêng (`.autoplay-*.lock`) và nhật ký nâng cấp riêng (`.hero-upgrade-*.json` hoặc `.tower-upgrade-*.json`) theo tên instance nên nhiều phiên chạy song song không xung đột nhau, kể cả khi BlueStacks đổi cổng ADB động sau lần khởi động lại. Trước mỗi cú bấm, tool đều xác nhận Grow Castle đang là ứng dụng hiển thị trên thiết bị đó. Dùng `Ctrl+C` để dừng hoặc thêm `--seconds 60` để giới hạn thời gian chạy.
 
 ## 4. Auto play hoạt động thế nào
 
@@ -96,29 +96,34 @@ Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riên
 
 Tool lấy ảnh qua ADB, chuẩn hóa ảnh về 1280 × 720 để đối chiếu mẫu, rồi quy đổi tọa độ bấm theo kích thước ảnh thật.
 
-### Nâng Lightning Castle bằng kim cương
+### Nâng Hero hoặc Tháp bằng kim cương
 
-Tính năng mặc định tắt. Thêm `--upgrade-tower` để bật cùng chế độ Wave hoặc Replay.
+Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` (nâng Hero gắn ở ô góc trên bên phải của lâu đài) hoặc `--upgrade-tower [SỐ_KC]` (nâng tầng tháp thứ hai từ dưới lên) kết hợp cùng bất kỳ chế độ đánh nào (`wave`, `skip`, `replay`). Nếu không truyền số theo sau thì mặc định kích hoạt ở mốc **50 kim cương trắng**.
 
 ```powershell
-# Xem trước các quyết định trên clip hướng dẫn
-.\.venv\Scripts\python.exe autoplay.py --video video3.mp4 --upgrade-tower
+# Chạy Wave và tự nâng Hero góc trên bên phải khi kim cương trắng >= 50 (mặc định)
+.\.venv\Scripts\python.exe autoplay.py --tap --upgrade-hero
 
-# Chạy Wave và bật nâng tháp
+# Tự chọn mốc kim cương trắng để bắt đầu nâng Hero (ví dụ đủ 30 hoặc 80 kim cương trắng là nâng)
+.\.venv\Scripts\python.exe autoplay.py --mode replay --tap --upgrade-hero 30
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-hero 80
+
+# Tự nâng Tháp (tầng 2 từ dưới lên) ở mốc mặc định 50 hoặc tự chọn mốc 30 / 60 kim cương trắng
 .\.venv\Scripts\python.exe autoplay.py --tap --upgrade-tower
-
-# Chạy Replay trên một instance cụ thể và bật nâng tháp
-.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-tower
+.\.venv\Scripts\python.exe autoplay.py --mode replay --tap --upgrade-tower 30
+.\.venv\Scripts\python.exe autoplay.py --tap --upgrade-tower 60
 ```
 
-1. Khi thấy **ít nhất 90 kim cương** ở màn chính, tool bấm ô vuông ngay phía trên cúp vàng để hiện các tầng tháp. Sau đó tool chọn ô thứ hai tính từ dưới lên và xác nhận **Lightning Castle** có kỹ năng **Chain Lightning**.
-2. Tool đọc cấp tháp và giá của nút **LV UP** thường. Giá hợp lệ là **2 hoặc 3 kim cương**, kiểm tra lại trước mỗi cú bấm.
-3. Sau mỗi lần bấm, tool xác nhận cấp tăng đúng 1 và số dư giảm đúng giá vừa đọc. Một đợt hoàn tất sau **30 lần bấm và 30 cấp**. Chi phí là 60 kim cương nếu giá luôn là 2, hoặc 90 nếu giá luôn là 3.
-4. Tool đóng menu, trở lại auto play và chờ số dư xuống dưới 90 rồi đạt lại mốc này để bắt đầu đợt mới. Nếu cấp, số dư hoặc giá không khớp, đợt dừng để bạn kiểm tra.
+1. Khi thấy số **kim cương trắng đạt mốc đã chọn** (mặc định `50`, tự bỏ qua phần kim cương cộng thêm màu cam như `+500`):
+   - Với `--upgrade-hero`: tool bấm vào **ô Hero góc trên bên phải** `(461, 92)` để mở bảng thông tin của bất kỳ Hero nào đang gắn tại ô đó.
+   - Với `--upgrade-tower`: tool bấm ô chuyển tầng tháp `(380, 457)` rồi mở ô tầng tháp thứ hai từ dưới lên `(380, 366)` (nhận diện mọi loại tháp lâu đài đang gắn tại ô đó như Lightning, Minigun, Ballista, Cannon, Shield, Gold...).
+2. Tool đọc cấp hiện tại và giá kim cương trên nút **LV UP** (`💎 1`, `2` hoặc `3` kim cương) tại `(896, 470)`. Sau khi nâng 10 cấp và thanh **`LV UP +10`** bật lên ở phía dưới, nếu số kim cương trắng còn lại đủ cho nút **LV UP +10** (`💎 10`, `20`...) và số cấp cần nâng còn từ `10` trở lên thì tool tự động bấm **LV UP +10** `(405, 628)` để tiết kiệm thời gian; khi kim cương trắng còn ít hơn giá `+10` thì tự quay về bấm **LV UP** đơn cho đến hết kim cương trắng.
+3. Sau mỗi lần bấm (`+1` hoặc `+10`), tool xác nhận cấp tăng đúng tương ứng và số kim cương trắng giảm đúng giá vừa đọc. Đợt nâng kết thúc khi đủ số cấp mục tiêu (`max(50, mốc kim cương)`, hoặc tùy chỉnh bằng `--upgrade-levels`), hoặc dừng sớm ngay khi số kim cương trắng còn lại nhỏ hơn giá nâng tiếp theo để **không bao giờ trừ lẹm vào phần kim cương cam (`+500`)**.
+4. Tool bấm nút **X** `(994, 160)` để đóng bảng thông tin Hero/Tháp, bấm tiếp nút **X** `(1247, 76)` để đóng danh sách Hero/Tháp bên phải (khôi phục lại giao diện ô Hero nếu vừa nâng Tháp), rồi tiếp tục đánh theo chế độ đang chọn.
 
 ### Quảng cáo thưởng vàng
 
-Tool mặc định tự xem quảng cáo thưởng vàng. Dùng `--ads` để bật hoặc `--no-ads` để bỏ qua **GET** và tiếp tục chơi. Cả hai tùy chọn dùng được với Wave, Replay, `--auto-captcha` và `--upgrade-tower`.
+Tool mặc định tự xem quảng cáo thưởng vàng. Dùng `--ads` để bật hoặc `--no-ads` để bỏ qua **GET** và tiếp tục chơi. Cả hai tùy chọn dùng được với Wave, Skip, Replay, `--auto-captcha`, `--upgrade-hero` và `--upgrade-tower`.
 
 ```powershell
 # Chạy Wave và tự xem quảng cáo
