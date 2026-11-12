@@ -142,24 +142,22 @@ Tool mặc định tự xem quảng cáo thưởng vàng. Dùng `--ads` để b�
    - Tự gửi phím **BACK** của Android nếu quảng cáo tự bật bảng Google Play đè lên hoặc bị kẹt ở màn kết thúc sau khi đã hết giờ.
 4. Game tự cộng vàng khi quay lại màn chính (`gold HUD changed`).
 
-### Tự giải CAPTCHA cốc kim cương
-
-Tính năng **mặc định bật sẵn** mỗi khi chạy kèm `--tap` (có thể truyền rõ `--auto-captcha` hoặc tắt bằng `--no-auto-captcha`).
+### Tự giải CAPTCHA trong auto play
 
 ```powershell
-# Tự đánh + tự nâng Hero + tự giải CAPTCHA (mặc định bật sẵn khi có --tap)
-.\.venv\Scripts\python.exe autoplay.py --serial 127.0.0.1:5555 --mode replay --tap --upgrade-hero 30
+# Đánh wave mới và tự giải CAPTCHA
+.\.venv\Scripts\python.exe autoplay.py --mode wave --tap --auto-captcha
 
-# Nếu muốn tắt tự giải CAPTCHA để tự chọn bằng tay
-.\.venv\Scripts\python.exe autoplay.py --mode wave --tap --no-auto-captcha
+# Replay trên nhiều instance và tự giải CAPTCHA
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --auto-captcha
 ```
 
-Tool hỗ trợ 3 tầng thu hình CAPTCHA theo thứ tự ưu tiên để đạt độ chính xác cao nhất:
-1. **Quay trực tiếp 60 FPS bên trong Android qua `adb shell screenrecord` (ưu tiên mặc định)**: lấy trọn vẹn chuyển động ~60 FPS mượt mà, **hoàn toàn không dính các nút phím ảo (`B`, `N`, `M`) của BlueStacks**, không bị đen hình trên OpenGL/Vulkan và giải được ngay cả khi cửa sổ giả lập đang bị cửa sổ khác che khuất hoặc chạy nhiều instance cùng lúc.
-2. **Luồng `adb exec-out screencap` thô tốc độ cao** nếu bản Android của giả lập không hỗ trợ `screenrecord`.
-3. **Chụp khung game 16:9 của cửa sổ giả lập trên Windows** làm phương án dự phòng cuối.
+Tool hỗ trợ 3 tầng thu hình CAPTCHA theo thứ tự ưu tiên:
+1. **Chụp khung game 16:9 của cửa sổ BlueStacks 5** (hoạt động cho cả các cửa sổ xếp cạnh nhau trên màn hình dù không phải cửa sổ đang active chuột, hoặc qua `PrintWindow` khi bị che trên chế độ DirectX).
+2. **Ghi hình ngắn qua `adb shell screenrecord`** bên trong Android nếu cửa sổ đang thu nhỏ hoặc không chụp được.
+3. **Luồng `adb exec-out screencap` thô tốc độ cao** nếu bản Android của BlueStacks 5 không hỗ trợ bộ mã hóa video của `screenrecord` (tool tự đo tốc độ khung hình trước khi bấm **Start** để không làm mất lượt nếu máy quá tải).
 
-Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc hiện lại nút **START**, tool tự thử lại tối đa 3 lần trước khi tạm dừng chờ người chơi. Bản ghi lượt chưa chọn được lưu trong `logs` để kiểm tra lại bằng `captcha.py`.
+Khi tool đã bắt đầu lượt mà chưa gửi được cú chọn cốc, bản ghi được lưu trong `logs` (MP4 hoặc NPZ) để kiểm tra lại bằng `captcha.py`.
 
 ### Bộ dò CAPTCHA độc lập
 

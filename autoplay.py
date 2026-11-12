@@ -829,12 +829,11 @@ def play(args, target, report, journal):
         if upgrade_target
         else None
     )
-    auto_captcha = bool(args.tap and args.auto_captcha)
     player = Player(
         args.mode,
         report,
         tower,
-        auto_captcha,
+        args.auto_captcha,
         watch_ads=args.ads,
         skip_waves=skip_waves,
     )
@@ -859,8 +858,6 @@ def play(args, target, report, journal):
             flush=True,
         )
 
-    captcha_attempts = 0
-    last_captcha_attempt = float("-inf")
     for time, original in frames:
         activity = None
         if args.video:
@@ -892,32 +889,21 @@ def play(args, target, report, journal):
                 screen = Screen("unfocused")
         was_paused = player.paused
         action = player.feed(time, screen)
-        if not player.paused:
-            captcha_attempts = 0
-        elif auto_captcha and screen.name == "captcha":
-            ready_for_retry = (
-                not was_paused
-                or (monotonic() - last_captcha_attempt >= 3.0
-                    and vision.captcha_start_visible(original))
-            )
-            if ready_for_retry and captcha_attempts < 3:
-                captcha_attempts += 1
-                attempt_started = monotonic()
-                last_captcha_attempt = attempt_started
-                limit = min(25, args.seconds - time) if args.seconds else 25
-                try:
-                    selected = limit > 0 and watch_target(
-                        target, limit, True,
-                        start_screen=vision.captcha_start_visible,
-                    )
-                except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-                    report(time + monotonic() - attempt_started, f"CAPTCHA attempt {captcha_attempts}/3 stopped: {exc}")
-                    selected = False
-                last_captcha_attempt = monotonic()
-                if selected:
-                    report(time + monotonic() - attempt_started, "CAPTCHA: selection sent; waiting for the game to resume")
-                elif captcha_attempts >= 3:
-                    report(time + monotonic() - attempt_started, "CAPTCHA: waiting for manual solution")
+        if args.auto_captcha and player.paused and not was_paused:
+            attempt_started = monotonic()
+            limit = min(16, args.seconds - time) if args.seconds else 16
+            try:
+                selected = limit > 0 and watch_target(
+                    target, limit, True,
+                    start_screen=vision.captcha_start_visible,
+                )
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+                report(time + monotonic() - attempt_started, f"CAPTCHA attempt stopped: {exc}")
+                selected = False
+            if selected:
+                report(time + monotonic() - attempt_started, "CAPTCHA: selection sent; waiting for the game to resume")
+            else:
+                report(time + monotonic() - attempt_started, "CAPTCHA: waiting for manual solution")
         if action:
             if action.keyevent is not None:
                 if args.tap:
@@ -975,8 +961,8 @@ def main():
     parser.add_argument("--tap", action="store_true", help="send the recognized actions to the emulator")
     parser.add_argument("--ads", action=argparse.BooleanOptionalAction, default=True,
                         help="open gold reward ads automatically (default: enabled)")
-    parser.add_argument("--auto-captcha", action=argparse.BooleanOptionalAction, default=True,
-                        help="solve diamond CAPTCHA automatically when --tap is enabled (default: enabled)")
+    parser.add_argument("--auto-captcha", action="store_true",
+                        help="automatically start and try one selection per CAPTCHA (requires --tap)")
     parser.add_argument("--upgrade-hero", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
                         help="upgrade the top-right Hero when white gems >= GEMS (default: 50)")
     parser.add_argument("--upgrade-tower", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
@@ -988,6 +974,8 @@ def main():
     args = parser.parse_args()
     if args.video and args.tap:
         parser.error("--video is preview only")
+    if args.auto_captcha and not args.tap:
+        parser.error("--auto-captcha requires --tap")
     if args.upgrade_hero is not None and args.upgrade_tower is not None:
         parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
     if (args.upgrade_gems is not None or args.upgrade_levels is not None) and (

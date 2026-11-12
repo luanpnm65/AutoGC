@@ -170,6 +170,88 @@ class Result:
         return None
 
 
+def _select_by_unique_spin_chain(observations, end_time):
+    """Eliminate twin-angle decoy groups by tracing all 8 settled slots backward.
+
+    Grow Castle partitions empty decoy cups into groups of >= 2 cups that share
+    identical rotation curves angle(t), while the diamond cup follows a unique,
+    faster rotation curve right up to settling.
+    """
+    start_time = observations[0].time
+    chains = {slot: {} for slot in range(len(SLOTS))}
+    for slot in range(len(SLOTS)):
+        pos = SLOTS[slot].astype(np.float64)
+        vel = np.zeros(2, dtype=np.float64)
+        last_seen = observations[-1].time
+        for idx in range(len(observations) - 1, -1, -1):
+            obs = observations[idx]
+            dt = last_seen - obs.time
+            if dt > 0.20:
+                break
+            if not obs.poses:
+                continue
+            predicted = pos - 0.55 * vel * dt
+            candidate = min(obs.poses, key=lambda p: p.distance(predicted))
+            if candidate.distance(predicted) <= 13 and candidate.distance(pos) <= 15:
+                if dt > 1e-3:
+                    vel = 0.55 * vel + 0.45 * ((pos - np.array(candidate.position)) / dt)
+                pos = np.array(candidate.position, dtype=np.float64)
+                last_seen = obs.time
+                chains[slot][idx] = candidate
+
+    late_time = start_time + 0.32 * (end_time - start_time)
+    late_indices = [i for i, obs in enumerate(observations) if obs.time >= late_time]
+    spin_frames = {}
+    late_rotation = {}
+    for slot in range(len(SLOTS)):
+        spinning = [
+            i for i in late_indices
+            if i in chains[slot] and chains[slot][i].score >= 0.72
+            and angle_distance(chains[slot][i].angle, 0) >= 30
+        ]
+        spin_frames[slot] = spinning
+        angles = [chains[slot][i].angle for i in late_indices if i in chains[slot]]
+        late_rotation[slot] = sum(angle_distance(a2, a1) for a1, a2 in zip(angles, angles[1:]))
+
+    twin_ratio = {}
+    for slot in range(len(SLOTS)):
+        spinning = spin_frames[slot]
+        best_match = 0.0
+        if spinning:
+            min_overlap = max(2, int(0.4 * len(spinning)))
+            for other in range(len(SLOTS)):
+                if other == slot:
+                    continue
+                overlap = [i for i in spinning if i in chains[other]]
+                if len(overlap) >= min_overlap:
+                    same = sum(
+                        1 for i in overlap
+                        if angle_distance(chains[slot][i].angle, chains[other][i].angle) <= 15
+                    )
+                    best_match = max(best_match, same / len(overlap))
+        twin_ratio[slot] = best_match
+
+    high_fps = len(observations) >= 45
+    min_spin = 6 if high_fps else 3
+    min_rot = 220 if high_fps else 150
+    max_board_rot = max(late_rotation.values(), default=0)
+    solos = [
+        slot for slot in range(len(SLOTS))
+        if twin_ratio[slot] <= 0.55
+        and len(spin_frames[slot]) >= min_spin
+        and late_rotation[slot] >= min_rot
+    ]
+    solos.sort(key=lambda s: (late_rotation[s], len(spin_frames[s])), reverse=True)
+    if solos and late_rotation[solos[0]] >= max_board_rot:
+        best = solos[0]
+        if len(solos) == 1 or (
+            late_rotation[best] >= 1.25 * late_rotation[solos[1]]
+            and len(spin_frames[best]) >= 1.4 * len(spin_frames[solos[1]])
+        ):
+            return best, len(spin_frames[best])
+    return None, 0
+
+
 def select_final(observations, initial_slot, end_time):
     if initial_slot is None:
         return None, 0, "no visible diamond entry"
@@ -177,7 +259,7 @@ def select_final(observations, initial_slot, end_time):
     initial = SLOTS[initial_slot]
     early = []
     for obs in observations:
-        if obs.time - start_time > 0.16:
+        if obs.time - start_time > 0.20:
             break
         near = [pose for pose in obs.outliers(0.73) if pose.distance(initial) <= 18
                 and angle_distance(pose.angle, obs.common_angle) >= 45]
@@ -185,6 +267,10 @@ def select_final(observations, initial_slot, end_time):
             early.append(min(near, key=lambda pose: pose.distance(initial)))
     if not early:
         return None, 0, "no fast spin matched the diamond entry"
+
+    chain_slot, chain_support = _select_by_unique_spin_chain(observations, end_time)
+    if chain_slot is not None:
+        return chain_slot, chain_support, ""
 
     # Trace strong angular outliers forward into an upright slot. When all cups
     # match the upright template again, spatial continuity carries their identity.
