@@ -33,6 +33,8 @@ LIST_SHIFTS = ((0, 0), (0, 1), (0, -1), (-1, 0), (1, 0), (-2, 0), (0, 2))
 BOUNCE_SHIFTS = ((0, 0), (0, -2), (0, 2), (0, -1), (0, 1), (-1, -2), (-1, 2))
 HOME_SHIFTS = ((0, 0), (0, 1), (0, 2), (-1, 1), (1, 1), (0, -1), (-2, 0), (-2, 2))
 HERO_SLOT_BORDERS = ((51, 66), (122, 134), (146, 158), (218, 231), (241, 253), (314, 326))
+CASTLE_SLOT_BORDERS = ((133, 141), (205, 213), (304, 312), (327, 334), (399, 406))
+TOGGLE_H_BORDERS = ((417, 426), (489, 498))
 
 
 def crop(rgb, box):
@@ -164,17 +166,29 @@ class TowerVision:
     def home(self, rgb):
         """Return (gems, edit layout) on a previously verified home screen."""
         rgb = np.asarray(rgb, dtype=np.int16)
-        if not self._matches(rgb, "toggle"):
+        toggle_h = sum(
+            float(np.max((rgb[y0:y1, 354:406].max(axis=2) < 100).mean(axis=1))) > 0.80
+            for y0, y1 in TOGGLE_H_BORDERS
+        )
+        toggle_v = sum(
+            float(np.max((rgb[432:484, x0:x1].max(axis=2) < 100).mean(axis=0))) > 0.80
+            for x0, x1 in ((342, 351), (409, 418))
+        )
+        if toggle_h + toggle_v < 3 and not self._matches(rgb, "toggle"):
             return None, None
-        if self._matches(rgb, "castle_slot"):
-            layout = "castle"
+        hero_borders = sum(
+            float(np.max((rgb[y0:y1, left:right].max(axis=2) < 95).mean(axis=1))) > 0.80
+            for y0, y1 in HERO_SLOT_BORDERS
+            for left, right in ((275, 321), (437, 486))
+        )
+        if hero_borders >= 8:
+            layout = "hero"
         else:
-            borders = sum(
-                float(np.max((rgb[y0:y1, left:right].max(axis=2) < 95).mean(axis=1))) > 0.80
-                for y0, y1 in HERO_SLOT_BORDERS
-                for left, right in ((275, 321), (437, 486))
+            castle_borders = sum(
+                float(np.max((rgb[y0:y1, 354:406].max(axis=2) < 95).mean(axis=1))) > 0.80
+                for y0, y1 in CASTLE_SLOT_BORDERS
             )
-            layout = "hero" if borders >= 8 else None
+            layout = "castle" if (castle_borders >= 4 or self._matches(rgb, "castle_slot")) else None
         return read_white_gems(rgb, self.numbers["gems"]), layout
 
     def _is_detail_card(self, rgb):
