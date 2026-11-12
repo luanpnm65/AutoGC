@@ -1,12 +1,14 @@
 """Play Grow Castle waves, cast ready skills, and collect gold ads on BlueStacks 5 or LDPlayer 9."""
 
 import argparse
+import base64
 from dataclasses import dataclass, replace
 from io import BytesIO
 from hashlib import sha256
 from pathlib import Path
 import subprocess
 from time import monotonic, sleep
+import zlib
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -107,6 +109,21 @@ AD_CLOSE_SCREENS = {
     "ad_back",
     "ad_external_overlay",
 }
+# Background-masked 28x28 RGB + 1-bit mask of the open Mimic chest (mouth, fangs, tongue, lid).
+MIMIC_TEMPLATE_B85 = (
+    "c-pO%Eo|FB6vtmwsU4V<0|z`Q+6o2+3IYraPMRlKnn8epfx&?T2Mi1h3<9j~fPsOf83Ysr1Ox;G1"
+    "QY}m1QY}m1Qc{q!6p?H6a*IR>s{KdYn9ebvZs@B@%es!U-v(NCFVQSV<cdNGa@V^ZITEI8<=oOCP"
+    "@*JoRi!qS&O6&!RK8;V|N{L5s^uGZ{tyH^a6U|({X5wLZj`hj6Ll=+%k!cqsSNvIuH~m<H&%`3_a"
+    "{~dKenx#X#n9VxZ@^#7(j`7MVCkl8zTn4khh!3L9Hr&{3$FIO%ZGkz{jb$w^mdfFiTNPVoK%6HR%"
+    "v6VSpVZHE+|jvd{`gxsvg_R3#L7?+k6+KseDN}rYsrY_u{9%!>_X58}s{hPItuqi^;R0s@o9<WmA"
+    "BsN&rr<p^L*|yhA$fQF@+3ntrPji<lo1|>PWNR{eDV_H2_9|B&+tjXL9`k(V^0jo}$V}ZkY`~iOR"
+    "LbI1mP4<-es8p1-U*TA90lq;EKfwyaU!i7K{oW#12<lq-)8<yXeTl7k(W+*e(0;*4wtutRedl;(9"
+    "CUdCQHOld5&0QcHKmp-qQC&^I5u7I1-sBnyCi{zMN+53UdXaLnkYlYuM(@fm)Jk%qKD@L3ZH8e9w"
+    "ujM#3s8l6VbW6lR2shEE=)*bJm;c7sO$zWid*qes4yIB(-emUz?RdsbvMJN_;z4~_>f;APhhj2<@"
+    "z;<@z_0pZrIlpRWaYYeJxirH*7pU<b$<LU<UP|A!OH7i<AVF!c$#l^+d)m62_s0<E<N&8RwsoX{y"
+    "1~|FAynI$3JR%uUu2$VgnKp^tcQ^CD*xGl1_aoSTqu|3ePG^fJ^$7s}?0f<EQP%3e6ui2I+Gk}0;"
+    "{YGe0X`{JzkUJxTd?&N;5C5#6L{^Ln(WtMd%mUW%7Xc}+EMa1j!_zi"
+)
 
 
 def viewport(image):
@@ -125,6 +142,15 @@ def pale_pixels(rgb, minimum):
     return (rgb.max(axis=2) > minimum) & (np.ptp(rgb, axis=2) < 38)
 
 
+def _box_sum_2d(integral, height, width):
+    return (
+        integral[height:, width:]
+        - integral[:-height, width:]
+        - integral[height:, :-width]
+        + integral[:-height, :-width]
+    )
+
+
 @dataclass(frozen=True)
 class Screen:
     name: str
@@ -135,6 +161,7 @@ class Screen:
     layout: str | None = None
     level: int | None = None
     cost: int | None = None
+    mimic: tuple[int, int] | None = None
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -153,6 +180,7 @@ class Vision:
         self.reward_light = ImageOps.invert(light_reward)
         self.reward_mixed = Image.fromarray(self.templates["reward_mixed"].astype(np.uint8)).convert("L")
         self.boss_kernels = self._build_boss_kernels()
+        self.mimic_templates = self._build_mimic_templates()
         self.ad_closer = AdCloser(atlas_path)
         self.tower = None
         if upgrade_tower:
@@ -207,6 +235,88 @@ class Vision:
             if corr.max() >= 0.78:
                 return True
         return False
+
+    @staticmethod
+    def _build_mimic_templates():
+        raw = zlib.decompress(base64.b85decode(MIMIC_TEMPLATE_B85))
+        rgb28 = np.frombuffer(raw[:28 * 28 * 3], dtype=np.uint8).reshape((28, 28, 3))
+        mask28 = np.unpackbits(np.frombuffer(raw[28 * 28 * 3:], dtype=np.uint8))[:28 * 28].reshape((28, 28))
+        pil_rgb = Image.fromarray(rgb28, "RGB")
+        pil_msk = Image.fromarray((mask28 * 255).astype(np.uint8), "L")
+        templates = []
+        for scale in (0.78, 0.92, 1.08, 1.25, 1.45):
+            sz = max(14, round((56.0 / 3.0) * scale))
+            trgb = np.asarray(pil_rgb.resize((sz, sz), Image.Resampling.BILINEAR), dtype=np.float32)
+            tmsk = (np.asarray(pil_msk.resize((sz, sz), Image.Resampling.BILINEAR)) > 175).astype(np.float32)
+            tm = trgb * tmsk[:, :, None]
+            tm_norm2 = float(np.sum(tm * tm))
+            m_count = float(tmsk.sum() * 3.0)
+            templates.append((sz, tmsk, tm, tm_norm2, m_count))
+        return tuple(templates)
+
+    def find_mimic(self, rgb):
+        y0, x0 = 88, 24
+        sub = rgb[y0:685:3, x0:1257:3]
+        r, g, b = sub[:, :, 0], sub[:, :, 1], sub[:, :, 2]
+        tongue = (r > 155) & (g > 65) & (g < 160) & (r - g > 48) & (r - b > 15) & (b - g > 8)
+        gums = (r > 90) & (b > 100) & (g < 85) & (b - g > 38) & (r - g > 30)
+        win = 22
+        s_gums = _box_sum_2d(np.pad(gums.astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1), win, win)
+        if s_gums.max() < 2:
+            return None
+        s_tongue = _box_sum_2d(np.pad(tongue.astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1), win, win)
+        if s_tongue.max() < 3:
+            return None
+        wood = (r > 118) & (g > 52) & (b < 75) & (r - b > 75) & (g - b > 18)
+        s_wood = _box_sum_2d(np.pad(wood.astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1), win, win)
+        mx = np.maximum(np.maximum(r, g), b)
+        mn = np.minimum(np.minimum(r, g), b)
+        white = (mn > 185) & (mx - mn < 40)
+        s_white = _box_sum_2d(np.pad(white.astype(np.int32), ((1, 0), (1, 0))).cumsum(0).cumsum(1), win, win)
+        hand_shifted = np.pad(s_white, ((0, 8), (0, 8)))[4:4 + s_tongue.shape[0], 4:4 + s_tongue.shape[1]]
+
+        cand = (s_gums >= 2) & (s_tongue >= 3) & (s_wood >= 14) & (hand_shifted >= 4)
+        if not np.any(cand):
+            return None
+
+        ys, xs = np.where(cand)
+        scores = (s_tongue[ys, xs] + s_gums[ys, xs]) * 3 + s_wood[ys, xs]
+        order = np.argsort(scores)[::-1]
+        checked = []
+        best_rmse = 36.0
+        best_pt = None
+        sh, sw, _ = sub.shape
+        sub_f = sub.astype(np.float32)
+        sub_f2 = np.sum(sub_f * sub_f, axis=2)
+        for idx in order:
+            cy, cx = int(ys[idx]), int(xs[idx])
+            if any(abs(cy - py) < 12 and abs(cx - px) < 12 for py, px in checked):
+                continue
+            checked.append((cy, cx))
+            for sz, tmsk, tm, tm_norm2, m_count in self.mimic_templates:
+                ry0 = max(0, cy - 7)
+                rx0 = max(0, cx - 7)
+                ry1 = min(sh, cy + 8 + sz)
+                rx1 = min(sw, cx + 8 + sz)
+                if ry1 - ry0 < sz or rx1 - rx0 < sz:
+                    continue
+                roi = sub_f[ry0:ry1, rx0:rx1]
+                roi2 = sub_f2[ry0:ry1, rx0:rx1]
+                w_rgb = np.lib.stride_tricks.sliding_window_view(roi, (sz, sz, 3))[:, :, 0]
+                w_p2 = np.lib.stride_tricks.sliding_window_view(roi2, (sz, sz))
+                p_energy = np.tensordot(w_p2, tmsk, axes=((-2, -1), (0, 1)))
+                cross = np.tensordot(w_rgb, tm, axes=((-3, -2, -1), (0, 1, 2)))
+                mse = np.maximum(0.0, (p_energy - 2.0 * cross + tm_norm2) / m_count)
+                min_idx = np.unravel_index(np.argmin(mse), mse.shape)
+                rmse = float(np.sqrt(mse[min_idx]))
+                if rmse < best_rmse:
+                    best_rmse = rmse
+                    py = ry0 + int(min_idx[0])
+                    px = rx0 + int(min_idx[1])
+                    best_pt = (x0 + (px + sz // 2) * 3, y0 + (py + sz // 2) * 3)
+            if len(checked) >= 3:
+                break
+        return best_pt
 
     def matches(self, rgb, name, offset_y=0):
         box, tolerance = TEMPLATES[name]
@@ -304,13 +414,17 @@ class Vision:
     def home_screen(self, rgb):
         gold = region(rgb, GOLD_HUD)
         gems, layout = self.tower.home(rgb) if self.tower else (None, None)
+        mimic = self.find_mimic(rgb)
         # The offer slides a few pixels as it appears after the results screen.
         for offset in (0, *range(-6, 0), *range(1, 7)):
             if self.matches(rgb, "gold_coin", offset) and (
                     self.matches(rgb, "gold_get", offset)
                     or self.matches(rgb, "gold_get_centered", offset)):
-                return Screen("gold", (626, 649 + offset), gold=gold, gems=gems, layout=layout)
-        return Screen("home", gold=gold, gems=gems, layout=layout)
+                return Screen(
+                    "gold", (626, 649 + offset),
+                    gold=gold, gems=gems, layout=layout, mimic=mimic,
+                )
+        return Screen("home", gold=gold, gems=gems, layout=layout, mimic=mimic)
 
     def captcha_start_visible(self, image):
         frame = viewport(image)
@@ -350,7 +464,7 @@ class Vision:
                 cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
                 if cyan.mean() >= 0.92:
                     ready.append(index)
-            return Screen("battle", ready=tuple(ready))
+            return Screen("battle", ready=tuple(ready), mimic=self.find_mimic(rgb))
         return Screen("unknown")
 
     def classify(
@@ -421,6 +535,15 @@ class Player:
         self.after_victory = False
         self.skills_used = {}
         self.last_skill = float("-inf")
+        self.last_mimic = float("-inf")
+        self.mimic_taps = 0
+
+    def collect_mimic(self, time, point):
+        if point is None or self.mimic_taps >= 3 or time - self.last_mimic < 1.2:
+            return None
+        self.last_mimic = time
+        self.mimic_taps += 1
+        return Action("collect Mimic chest", point)
 
     def start_ad(self, time, gold=None):
         self.ad, self.ad_since, self.ad_warned = "watch", time, False
@@ -534,8 +657,13 @@ class Player:
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
+        if name in {"home", "gold", "battle"} and screen.mimic is None:
+            self.mimic_taps = 0
         if name in {"home", "battle"} and age >= 0.45:
             self.skip_offer = False
+        if name in {"home", "gold"} and screen.mimic is not None and age >= 0.20:
+            if action := self.collect_mimic(time, screen.mimic):
+                return action
         if name == "home" and self.after_victory:
             if age < 1.6:
                 return None
@@ -563,6 +691,10 @@ class Player:
             self.report(time, "Unknown screen: waiting for the main screen or a battle")
             self.wait_notified = True
         if name == "battle":
+            if screen.mimic is not None and age >= 0.20:
+                if action := self.collect_mimic(time, screen.mimic):
+                    self.last_skill = time
+                    return action
             return self.cast(time, screen.ready) if age >= 0.45 else None
         if self.acted or age < 0.20:
             return None
