@@ -170,6 +170,7 @@ class Screen:
     layout: str | None = None
     level: int | None = None
     cost: int | None = None
+    bulk_cost: int | None = None
     mimic: tuple[int, int] | None = None
     skip_30: bool = False
     raw_point: bool = False
@@ -479,8 +480,8 @@ class Vision:
             return Screen("victory")
         panel = self.tower.panel(rgb) if self.tower is not None else None
         if panel is not None and panel[0] == "tower":
-            kind, gems, level, cost = panel
-            return Screen(kind, gems=gems, level=level, cost=cost)
+            kind, gems, level, cost, bulk_cost = panel
+            return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         hud = self.matches(rgb, "hud")
         dim = not hud and self.matches(rgb, "hud_dim")
         if (hud or dim) and self.hp_empty(rgb, dim):
@@ -500,8 +501,8 @@ class Vision:
         if self.tower is not None and self.tower.is_home(rgb):
             return self.home_screen(rgb)
         if panel is not None:
-            kind, gems, level, cost = panel
-            return Screen(kind, gems=gems, level=level, cost=cost)
+            kind, gems, level, cost, bulk_cost = panel
+            return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         if hud and self.matches(rgb, "speed") and (
                 self.matches(rgb, "wave") or self.matches_boss(rgb)):
             ready = []
@@ -911,11 +912,14 @@ def play(args, target, report, journal):
             else:
                 if args.tap:
                     if action.charge is not None:
+                        expected_gems, expected_level, expected_cost, step_levels = action.charge
                         raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
                         with Image.open(BytesIO(raw)) as check:
                             latest = vision.classify(viewport(check))
+                            observed_cost = latest.bulk_cost if step_levels == 10 else latest.cost
                             if (check.size != original.size or latest.name != "tower"
-                                    or (latest.gems, latest.level, latest.cost) != action.charge
+                                    or (latest.gems, latest.level, observed_cost)
+                                    != (expected_gems, expected_level, expected_cost)
                                     or foreground_activity(target.adb, target.serial) != activity):
                                 tower.suspend()
                                 continue

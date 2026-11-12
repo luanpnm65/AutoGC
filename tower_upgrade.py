@@ -1,4 +1,4 @@
-"""Manage a verified batch of single Hero or Castle Tower diamond upgrades."""
+"""Manage a verified batch of Hero or Castle Tower diamond upgrades."""
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -8,11 +8,13 @@ import json
 GEM_THRESHOLD = 50
 UPGRADE_COUNT = 50
 VALID_COSTS = (1, 2, 3)
+VALID_BULK_COSTS = range(10, 31)
 HERO_SLOT = (461, 92)
 TOWER_LAYER_TOGGLE = (380, 457)
 LIGHTNING_LAYER = (380, 366)
 EXIT_LAYER_VIEW = (550, 90)
 LV_UP = (896, 470)
+LV_UP_10 = (405, 628)
 DETAIL_CLOSE = (994, 160)
 LIST_CLOSE = (1247, 76)
 
@@ -21,7 +23,7 @@ LIST_CLOSE = (1247, 76)
 class Action:
     name: str
     point: tuple[int, int] | None = None
-    charge: tuple[int, int, int] | None = None
+    charge: tuple[int, int, int, int] | None = None
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -33,18 +35,26 @@ class Batch:
     restore_hero: bool
     confirmed: int = 0
     pending_cost: int | None = None
+    pending_levels: int = 1
     done: bool = False
     closed: bool = False
 
     def validate(self):
+        valid_pending = (
+            self.pending_cost is None
+            or (self.pending_levels == 1
+                and type(self.pending_cost) is int and self.pending_cost in VALID_COSTS)
+            or (self.pending_levels == 10
+                and type(self.pending_cost) is int and self.pending_cost in VALID_BULK_COSTS)
+        )
         if (type(self.gems) is not int or self.gems < 0
                 or type(self.level) is not int or self.level < 1
                 or type(self.confirmed) is not int or self.confirmed < 0
                 or type(self.restore_hero) is not bool
+                or type(self.pending_levels) is not int or self.pending_levels not in (1, 10)
                 or type(self.done) is not bool
                 or type(self.closed) is not bool
-                or (self.pending_cost is not None
-                    and (type(self.pending_cost) is not int or self.pending_cost not in VALID_COSTS))
+                or not valid_pending
                 or (self.pending_cost is not None and self.done)
                 or (self.closed and self.pending_cost is not None)):
             raise ValueError("Invalid upgrade journal")
@@ -160,11 +170,18 @@ class TowerUpgrade:
         return self.finish(time, name, layout)
 
     def feed(self, time, screen):
-        reading = (screen.name, screen.gems, screen.layout, screen.level, screen.cost)
+        reading = (
+            screen.name,
+            screen.gems,
+            screen.layout,
+            screen.level,
+            screen.cost,
+            screen.bulk_cost,
+        )
         if reading != self.observation:
             self.observation, self.since = reading, time
         stable = time - self.since >= 0.18
-        name, gems, layout, level, cost = reading
+        name, gems, layout, level, cost, bulk_cost = reading
 
         if not self.active:
             if self.batch is not None:
@@ -234,13 +251,16 @@ class TowerUpgrade:
             )
 
         if self.batch is not None and self.recovered_pending:
-            expected_after = (self.batch.gems - self.batch.pending_cost, self.batch.level + 1)
+            expected_after = (
+                self.batch.gems - self.batch.pending_cost,
+                self.batch.level + self.batch.pending_levels,
+            )
             expected_before = (self.batch.gems, self.batch.level)
             if (gems, level) not in (expected_after, expected_before):
-                # User played or upgraded manually after the previous crash; reset to live state.
                 self.batch = None
             elif (gems, level) == expected_before:
                 self.batch.pending_cost = None
+                self.batch.pending_levels = 1
                 self.save()
             self.recovered_pending = False
 
@@ -250,11 +270,16 @@ class TowerUpgrade:
                     time, name, layout,
                     f"{self.label} upgrade skipped ({gems} white gems < {self.gem_threshold}): closing menu",
                 )
-            if cost not in VALID_COSTS:
+            can_bulk = (
+                bulk_cost in VALID_BULK_COSTS
+                and gems >= bulk_cost
+                and self.upgrade_count >= 10
+            )
+            if not can_bulk and cost not in VALID_COSTS:
                 return self.wait_for_reading(
                     time, f"{self.label} upgrade stopped: single-upgrade diamond price is unverified."
                 )
-            if gems < cost:
+            if not can_bulk and gems < cost:
                 return self._complete_batch(
                     time, name, layout,
                     f"{self.label} upgrade stopped before tapping ({gems} white gems < {cost}): closing menu",
@@ -264,18 +289,24 @@ class TowerUpgrade:
 
         batch = self.batch
         if batch.pending_cost is not None:
-            if (gems, level) != (batch.gems - batch.pending_cost, batch.level + 1):
+            if (gems, level) != (
+                batch.gems - batch.pending_cost,
+                batch.level + batch.pending_levels,
+            ):
                 return self.wait_for_reading(
                     time, f"{self.label} upgrade stopped at {batch.confirmed}/{self.upgrade_count}: "
                     "last tap is unconfirmed; inspect the level and gem balance before restarting."
                 )
+            step_done = batch.pending_levels
             batch.gems, batch.level = gems, level
             batch.pending_cost = None
-            batch.confirmed += 1
+            batch.pending_levels = 1
+            batch.confirmed += step_done
             self.save()
+            step_tag = f" (+{step_done})" if step_done > 1 else ""
             self.report(
                 time,
-                f"{self.label} {batch.confirmed}/{self.upgrade_count} confirmed "
+                f"{self.label} {batch.confirmed}/{self.upgrade_count}{step_tag} confirmed "
                 f"(level {level}, {gems} white gems)",
             )
             self.unverified_since = None
@@ -298,6 +329,17 @@ class TowerUpgrade:
                 f"{self.label} stopped at {batch.confirmed}/{self.upgrade_count} "
                 f"({gems} white gems remaining): closing menu",
             )
+
+        if (bulk_cost in VALID_BULK_COSTS
+                and gems >= bulk_cost
+                and self.upgrade_count - batch.confirmed >= 10):
+            self.unverified_since = None
+            return True, Action(
+                f"upgrade {self.label} +10 ({batch.confirmed + 10}/{self.upgrade_count}, {bulk_cost} gems)",
+                LV_UP_10,
+                (gems, level, bulk_cost, 10),
+            )
+
         if cost not in VALID_COSTS:
             return self.wait_for_reading(
                 time, f"{self.label} upgrade stopped: single-upgrade diamond price is unverified."
@@ -308,19 +350,26 @@ class TowerUpgrade:
         return True, Action(
             f"upgrade {self.label} {batch.confirmed + 1}/{self.upgrade_count} ({cost} {unit})",
             LV_UP,
-            (gems, level, cost),
+            (gems, level, cost, 1),
         )
 
     def record_tap(self, action):
         # Write ahead of the ADB call. A crash leaves a pending tap that can
         # only be resolved by observing the exact resulting level and balance.
-        gems, level, cost = action.charge
+        gems, level, step_cost, step_levels = action.charge
         batch = self.batch
+        valid_step = (
+            (step_levels == 1 and step_cost in VALID_COSTS)
+            or (step_levels == 10 and step_cost in VALID_BULK_COSTS)
+        )
         if (batch is None or batch.pending_cost is not None or batch.done
-                or batch.confirmed >= self.upgrade_count
-                or (gems, level) != (batch.gems, batch.level) or cost not in VALID_COSTS):
+                or batch.confirmed + step_levels > self.upgrade_count
+                or (gems, level) != (batch.gems, batch.level)
+                or gems < step_cost
+                or not valid_step):
             raise RuntimeError(f"{self.label} upgrade stopped: journal and planned tap disagree.")
-        batch.pending_cost = cost
+        batch.pending_cost = step_cost
+        batch.pending_levels = step_levels
         self.save()
 
     def finish(self, time, name, layout):

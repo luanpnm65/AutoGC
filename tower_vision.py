@@ -9,6 +9,7 @@ from PIL import Image
 GEMS = (283, 2, 399, 36)
 LEVEL = (316, 421, 456, 455)
 PRICE = (902, 480, 965, 517)
+BULK10_PRICE = (345, 630, 480, 671)
 UI = {
     "toggle": ((341, 419, 418, 499), 23),
     "castle_slot": ((343, 325, 417, 408), 24),
@@ -185,6 +186,36 @@ class TowerVision:
             return False
         return self._matches(rgb, "detail_close", DETAIL_SHIFTS, min_std=12)
 
+    def _bulk10_cost(self, rgb):
+        if not self._matches(rgb, "bulk", DETAIL_SHIFTS):
+            return None
+        left, top, right, bottom = BULK10_PRICE
+        for dx, dy in BOUNCE_SHIFTS:
+            sub = crop(rgb, (left + dx, top + dy, right + dx, bottom + dy))
+            blobs = [g for g in glyphs(digit_mask(sub, "cost")) if g.shape[0] >= 16]
+            if len(blobs) < 3 or blobs[0].shape[1] < 23:
+                continue
+            digits = blobs[1:]
+            if len(digits) != 2:
+                continue
+            value = 0
+            valid = True
+            for glyph in digits:
+                height, width = glyph.shape
+                if not (18 <= height <= 28 and 11 <= width <= 21):
+                    valid = False
+                    break
+                scores = np.count_nonzero(self.numbers["cost"] != normalize(glyph),
+                                          axis=(2, 3)).min(axis=1)
+                best, second = np.argsort(scores)[:2]
+                if scores[best] > 72 or scores[second] - scores[best] < 17:
+                    valid = False
+                    break
+                value = value * 10 + int(best)
+            if valid and 10 <= value <= 30:
+                return value
+        return None
+
     def panel(self, rgb):
         """Read a verified Hero/Tower detail panel or right-side Heroes/Castles list."""
         rgb = np.asarray(rgb, dtype=np.int16)
@@ -197,7 +228,8 @@ class TowerVision:
                 value = self._number(rgb, PRICE, "cost", 1, BOUNCE_SHIFTS)
                 if value in (1, 2, 3):
                     cost = value
-            return "tower", gems, level, cost
+            bulk_cost = self._bulk10_cost(rgb)
+            return "tower", gems, level, cost, bulk_cost
         if self._matches(rgb, "list_close", LIST_SHIFTS, min_std=14):
-            return "castles", None, None, None
+            return "castles", None, None, None, None
         return None
