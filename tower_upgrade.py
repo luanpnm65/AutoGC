@@ -3,6 +3,10 @@
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
+import random
+
+
+_UPGRADE_RNG = random.SystemRandom()
 
 
 GEM_THRESHOLD = 50
@@ -26,7 +30,6 @@ class Action:
     charge: tuple[int, int, int, int] | None = None
     raw_point: bool = False
     keyevent: int | None = None
-    points: tuple[tuple[int, int], ...] | None = None
 
 
 @dataclass
@@ -93,6 +96,8 @@ class TowerUpgrade:
         target="tower",
         gem_threshold=GEM_THRESHOLD,
         upgrade_count=None,
+        humanize=False,
+        rng=None,
     ):
         if target not in {"hero", "tower"}:
             raise ValueError(f"Unsupported upgrade target: {target!r}")
@@ -105,6 +110,8 @@ class TowerUpgrade:
         self.label = "Hero" if target == "hero" else "Tower"
         self.gem_threshold = gem_threshold
         self.upgrade_count = max_upgrades
+        self.humanize = humanize
+        self.rng = rng or _UPGRADE_RNG
         self.report = report
         self.journal = journal
         self.batch = None
@@ -138,6 +145,7 @@ class TowerUpgrade:
         self.pending_since = None
         self.missed_taps = 0
         self.close_retries = 0
+        self.stable_delay = 0.18
 
     def save(self):
         if self.journal is not None:
@@ -214,7 +222,15 @@ class TowerUpgrade:
         )
         if reading != self.observation:
             self.observation, self.since = reading, time
-        stable = time - self.since >= 0.18
+            if self.humanize:
+                self.stable_delay = (
+                    self.rng.uniform(0.50, 0.78)
+                    if self.rng.random() < 0.12
+                    else self.rng.uniform(0.20, 0.44)
+                )
+            else:
+                self.stable_delay = 0.18
+        stable = time - self.since >= self.stable_delay
         name, gems, layout, level, cost, bulk_cost = reading
 
         if not self.active:
