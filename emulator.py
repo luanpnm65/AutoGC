@@ -470,6 +470,7 @@ def human_tap(
     viewport_size: tuple[int, int] = (1280, 720),
     raw_point: bool = False,
     jitter: tuple[float, float] = (6.0, 6.0),
+    duration_range: tuple[int, int] | None = None,
     rng=None,
 ) -> tuple[int, int]:
     """Send a humanized touch press with safe button jitter, hold duration, and micro-drift."""
@@ -489,13 +490,20 @@ def human_tap(
     x1 = max(4, min(max_x, x1))
     y1 = max(4, min(max_y, y1))
 
-    drift_choices = (-1, 0, 0, 0, 1, 2 if gen.random() < 0.2 else 0)
+    if duration_range is not None:
+        lo, hi = duration_range
+        drift_choices = (-1, 0, 0, 0, 1)
+        mid = (lo + hi) / 2.0
+        sigma = max(1.0, (hi - lo) / 4.0)
+        duration_ms = round(max(float(lo), min(float(hi), gen.gauss(mid, sigma))))
+    else:
+        drift_choices = (-1, 0, 0, 0, 1, 2 if gen.random() < 0.2 else 0)
+        if gen.random() < 0.12:
+            duration_ms = gen.randint(115, 162)
+        else:
+            duration_ms = round(max(46.0, min(118.0, gen.gauss(74.0, 16.0))))
     x2 = max(4, min(max_x, x1 + gen.choice(drift_choices)))
     y2 = max(4, min(max_y, y1 + gen.choice(drift_choices)))
-    if gen.random() < 0.12:
-        duration_ms = gen.randint(115, 162)
-    else:
-        duration_ms = round(max(46.0, min(118.0, gen.gauss(74.0, 16.0))))
     adb_run(adb, serial, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration_ms))
     return x1, y1
 
