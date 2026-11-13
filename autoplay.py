@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from io import BytesIO
 from hashlib import sha256
 from pathlib import Path
+import random
 import subprocess
 from time import monotonic, sleep
 import zlib
@@ -23,6 +24,7 @@ from emulator import (
     foreground_activity,
     foreground_window,
     format_instances,
+    human_tap,
     is_ad_activity,
     resolve_target,
 )
@@ -189,7 +191,7 @@ class Screen:
 
 
 class Vision:
-    def __init__(self, upgrade_tower=False):
+    def __init__(self, upgrade_tower=True):
         atlas_path = Path(__file__).with_name("play_templates.npz")
         with np.load(atlas_path, allow_pickle=False) as atlas:
             self.templates = {name: atlas[name].astype(np.int16) for name in TEMPLATES}
@@ -596,12 +598,25 @@ class Vision:
 
 
 class Player:
-    def __init__(self, mode, report, tower=None, auto_captcha=False, *, watch_ads=True, skip_waves=False):
+    def __init__(
+        self,
+        mode,
+        report,
+        tower=None,
+        auto_captcha=False,
+        *,
+        watch_ads=True,
+        skip_waves=False,
+        humanize=False,
+        rng=None,
+    ):
         if mode == "skip":
             mode = "wave"
             skip_waves = True
         self.mode = mode
         self.skip_waves = skip_waves
+        self.humanize = humanize
+        self.rng = rng if rng is not None else random.SystemRandom()
         self.report = report
         self.tower = tower
         self.auto_captcha = auto_captcha
@@ -625,6 +640,47 @@ class Player:
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
         self.mimic_taps = 0
+        self.battle_delay = 0.45
+        self.home_delay = 0.85
+        self.menu_delay = 0.20
+        self.victory_wait = 1.60
+        self.skill_cooldown = 0.30
+        self.waves_completed = 0
+        self.in_battle = False
+        self.next_break_waves = self.rng.randint(18, 32)
+        self.break_logged = False
+
+    def _sample_skill_cooldown(self):
+        if not self.humanize:
+            return 0.30
+        if self.rng.random() < 0.10:
+            return self.rng.uniform(0.58, 0.92)
+        return self.rng.uniform(0.28, 0.54)
+
+    def _roll_reaction_delays(self, prev_screen, new_screen):
+        if not self.humanize:
+            self.battle_delay = 0.45
+            self.home_delay = 0.85
+            self.menu_delay = 0.20
+            self.victory_wait = 1.60
+            return
+        self.battle_delay = self.rng.uniform(0.45, 0.88)
+        self.menu_delay = self.rng.uniform(0.24, 0.56)
+        self.victory_wait = self.rng.uniform(1.60, 2.25)
+        if new_screen == "battle":
+            self.in_battle = True
+        elif new_screen in {"home", "gold"}:
+            if self.in_battle:
+                self.waves_completed += 1
+                self.in_battle = False
+            self.break_logged = False
+            if self.waves_completed >= self.next_break_waves:
+                self.home_delay = self.rng.uniform(4.0, 8.5)
+                self.next_break_waves = self.waves_completed + self.rng.randint(18, 32)
+            elif self.rng.random() < 0.08:
+                self.home_delay = self.rng.uniform(1.90, 3.30)
+            else:
+                self.home_delay = self.rng.uniform(0.88, 1.65)
 
     def collect_mimic(self, time, point):
         if point is None or self.mimic_taps >= 3 or time - self.last_mimic < 1.2:
@@ -711,9 +767,11 @@ class Player:
             else None
         )
         if name != self.screen or target_bucket != self.screen_target:
+            prev_screen = self.screen
             self.screen, self.screen_target, self.since = name, target_bucket, time
             self.acted = False
             self.wait_notified = False
+            self._roll_reaction_delays(prev_screen, name)
         age = time - self.since
         if self.ad is None and (name in {"ad_playing", "ad_resume"} or name in AD_CLOSE_SCREENS):
             self.start_ad(time)
@@ -749,15 +807,15 @@ class Player:
             self.mimic_taps = 0
         if name in {"home", "battle"} and age >= 0.45:
             self.skip_offer = False
-        if name in {"home", "gold"} and screen.mimic is not None and age >= 0.20:
+        if name in {"home", "gold"} and screen.mimic is not None and age >= self.menu_delay:
             if action := self.collect_mimic(time, screen.mimic):
                 return action
         if name == "home" and self.after_victory:
-            if age < 1.6:
+            if age < self.victory_wait:
                 return None
             self.after_victory = False
         if name == "gold" and not self.skip_offer:
-            if age < 0.20:
+            if age < self.menu_delay:
                 return None
             self.after_victory = False
             self.start_ad(time, screen.gold)
@@ -782,11 +840,12 @@ class Player:
             self.report(time, "Unknown screen: waiting for the main screen or a battle")
             self.wait_notified = True
         if name == "battle":
-            if screen.mimic is not None and age >= 0.20:
+            if screen.mimic is not None and age >= self.menu_delay:
                 if action := self.collect_mimic(time, screen.mimic):
                     self.last_skill = time
+                    self.skill_cooldown = self._sample_skill_cooldown()
                     return action
-            if age < 0.45:
+            if age < self.battle_delay:
                 return None
             return self.cast(
                 time,
@@ -794,7 +853,7 @@ class Player:
                 smith_ready=screen.smith_ready,
                 hp_low=screen.hp_low,
             )
-        if self.acted or age < 0.20:
+        if self.acted or age < self.menu_delay:
             return None
         if name == "skip":
             if self.skip_waves and self.mode == "wave":
@@ -806,16 +865,23 @@ class Player:
                     action = Action("close Wave Skip", screen.point)
             else:
                 action = Action("close Wave Skip", screen.point)
-        elif name == "tower" and age >= 0.35:
+        elif name == "tower" and age >= max(0.35, self.menu_delay):
             action = Action("close detail panel", DETAIL_CLOSE)
-        elif name == "castles" and age >= 0.35:
+        elif name == "castles" and age >= max(0.35, self.menu_delay):
             action = Action("close side menu", LIST_CLOSE)
         elif name == "replay_menu" and self.mode == "replay":
             action = Action("start Replay 100%", screen.point)
-        elif name in {"home", "gold"} and age >= 0.85:
+        elif name in {"home", "gold"}:
             if screen.layout == "castle" and self.tower is None:
+                if age < max(0.35, self.menu_delay):
+                    return None
                 action = Action("restore hero slots", EXIT_LAYER_VIEW)
             else:
+                if self.humanize and self.home_delay >= 4.0 and not self.break_logged and age >= 0.85:
+                    self.report(time, f"Short pause before next wave ({self.home_delay:.1f}s)")
+                    self.break_logged = True
+                if age < self.home_delay:
+                    return None
                 self.skills_used.clear()
                 if self.mode == "wave":
                     action = Action("start next Battle", (1191, 648))
@@ -837,30 +903,61 @@ class Player:
             self.skills_used[index] = 0 if index in ready else self.skills_used[index] + 1
             if self.skills_used[index] >= 2:
                 del self.skills_used[index]
-        if time - self.last_skill < 0.30:
+        if time - self.last_skill < self.skill_cooldown:
             return None
         if smith_ready and hp_low and "smith" not in self.skills_used:
             self.skills_used["smith"] = 0
             self.last_skill = time
+            self.skill_cooldown = self._sample_skill_cooldown()
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
-        for index in ready:
-            if index not in self.skills_used:
-                self.skills_used[index] = 0
-                self.last_skill = time
-                label, x, _, y = SKILLS[index]
-                return Action(f"cast {label}", (x, y))
-        return None
+        candidates = [idx for idx in ready if idx not in self.skills_used]
+        if not candidates:
+            return None
+        if self.humanize and len(candidates) > 1:
+            archers = [idx for idx in candidates if idx < len(ARCHER_SKILLS)]
+            heroes = [idx for idx in candidates if idx >= len(ARCHER_SKILLS)]
+            self.rng.shuffle(archers)
+            self.rng.shuffle(heroes)
+            candidates = archers + heroes
+        index = candidates[0]
+        self.skills_used[index] = 0
+        self.last_skill = time
+        self.skill_cooldown = self._sample_skill_cooldown()
+        label, x, _, y = SKILLS[index]
+        return Action(f"cast {label}", (x, y))
 
 
-def adb_frames(adb, serial, seconds):
+_PLAY_RNG = random.SystemRandom()
+
+
+def action_jitter(action: Action) -> tuple[float, float]:
+    """Return safe (rx, ry) hit-box jitter in 1280x720 viewport pixels."""
+    if action.raw_point:
+        return (2.0, 2.0)
+    label = action.name
+    if label in {"start next Battle", "open Replay menu"}:
+        return (15.0, 11.0)
+    if label in {"start Replay 100%", "select Wave Skip 30", "open gold ad (GET)"}:
+        return (13.0, 6.5)
+    if label == "restore hero slots":
+        return (16.0, 9.0)
+    if label.startswith("cast "):
+        return (8.5, 8.5)
+    if label.startswith("upgrade "):
+        return (11.0, 6.0)
+    return (5.0, 5.0)
+
+
+def adb_frames(adb, serial, seconds, *, humanize=True):
     start = monotonic()
     while not seconds or monotonic() - start < seconds:
         sample = monotonic()
         raw = adb_run(adb, serial, "exec-out", "screencap", "-p")
         with Image.open(BytesIO(raw)) as screen:
             yield sample - start, screen.copy()
-        sleep(max(0, 0.22 - (monotonic() - sample)))
+        interval = _PLAY_RNG.uniform(0.20, 0.30) if humanize else 0.22
+        sleep(max(0, interval - (monotonic() - sample)))
 
 
 def replay_frames(video):
@@ -874,6 +971,7 @@ def replay_frames(video):
 def play(args, target, report, journal):
     skip_waves = args.skip or args.mode == "skip"
     mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
+    use_humanize = bool(args.tap and getattr(args, "humanize", True))
     if args.upgrade_hero is not None:
         upgrade_target = "hero"
         gem_threshold = args.upgrade_gems if args.upgrade_gems is not None else args.upgrade_hero
@@ -890,6 +988,7 @@ def play(args, target, report, journal):
             target=upgrade_target,
             gem_threshold=gem_threshold,
             upgrade_count=args.upgrade_levels,
+            humanize=use_humanize,
         )
         if upgrade_target
         else None
@@ -902,8 +1001,9 @@ def play(args, target, report, journal):
         auto_captcha,
         watch_ads=args.ads,
         skip_waves=skip_waves,
+        humanize=use_humanize,
     )
-    vision = Vision(upgrade_target is not None)
+    vision = Vision(True)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
@@ -917,7 +1017,7 @@ def play(args, target, report, journal):
             allow_port_refresh=(target.emulator == "bluestacks" and not args.serial),
         )
         target = replace(target, serial=connected_serial)
-        frames = adb_frames(target.adb, target.serial, args.seconds)
+        frames = adb_frames(target.adb, target.serial, args.seconds, humanize=use_humanize)
         print(
             f"{prefix} mode={mode_label} emulator={target.emulator} "
             f"instance={target.instance} ({target.display_name!r}) source={target.serial}",
@@ -989,6 +1089,7 @@ def play(args, target, report, journal):
                     adb_run(target.adb, target.serial, "shell", "input", "keyevent", str(action.keyevent))
                 report(time, f"{prefix} {action.name}")
             else:
+                tap_logged = action.point
                 if args.tap:
                     if action.charge is not None:
                         expected_gems, expected_level, expected_cost, step_levels = action.charge
@@ -1003,15 +1104,28 @@ def play(args, target, report, journal):
                                 tower.suspend()
                                 continue
                         tower.record_tap(action)
-                    if action.raw_point:
-                        x, y = round(action.point[0]), round(action.point[1])
+                    if use_humanize:
+                        tap_logged = human_tap(
+                            target.adb,
+                            target.serial,
+                            action.point,
+                            frame_size=original.size,
+                            viewport_size=VIEWPORT,
+                            raw_point=action.raw_point,
+                            jitter=action_jitter(action),
+                            rng=_PLAY_RNG,
+                        )
                     else:
-                        x = round(action.point[0] * original.width / VIEWPORT[0])
-                        y = round(action.point[1] * original.height / VIEWPORT[1])
-                    adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
+                        if action.raw_point:
+                            x, y = round(action.point[0]), round(action.point[1])
+                        else:
+                            x = round(action.point[0] * original.width / VIEWPORT[0])
+                            y = round(action.point[1] * original.height / VIEWPORT[1])
+                        adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
+                        tap_logged = (x, y)
                 elif action.charge is not None:
                     tower.record_tap(action)
-                report(time, f"{prefix} {action.name} {action.point}")
+                report(time, f"{prefix} {action.name} {tap_logged}")
 
 
 def _device_lock_key(target) -> str:
@@ -1038,6 +1152,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="list detected emulator instances and exit")
     parser.add_argument("--seconds", type=float, default=0, help="live capture limit, 0 waits indefinitely")
     parser.add_argument("--tap", action="store_true", help="send the recognized actions to the emulator")
+    parser.add_argument("--humanize", action=argparse.BooleanOptionalAction, default=True,
+                        help="humanize touch coordinates, press duration, and timing jitter (default: enabled)")
     parser.add_argument("--ads", action=argparse.BooleanOptionalAction, default=True,
                         help="open gold reward ads automatically (default: enabled)")
     parser.add_argument("--auto-captcha", action=argparse.BooleanOptionalAction, default=True,

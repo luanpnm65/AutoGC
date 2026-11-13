@@ -159,7 +159,15 @@ Tool hỗ trợ 3 tầng thu hình CAPTCHA theo thứ tự ưu tiên để đạ
 2. **Luồng `adb exec-out screencap` thô tốc độ cao** nếu bản Android của giả lập không hỗ trợ `screenrecord`.
 3. **Chụp khung game 16:9 của cửa sổ giả lập trên Windows** làm phương án dự phòng cuối.
 
-Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc hiện lại nút **START**, tool tự thử lại tối đa 3 lần trước khi tạm dừng chờ người chơi. Bản ghi lượt chưa chọn được lưu trong `logs` để kiểm tra lại bằng `captcha.py`.
+Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc hiện lại nút **START**, tool tự thử lại tối đa 3 lần trước khi tạm dừng chờ người chơi. Tối đa 10 bản ghi `.mp4` chưa chọn gần nhất được giữ trong `logs` để kiểm tra lại bằng `captcha.py`.
+
+### Kỹ năng hồi máu khẩn cấp Smith & cơ chế giả lập thao tác người thật (`--humanize`)
+
+- **Tự cast Smith khi máu lâu đài `< 50%`**: Tool theo dõi thanh hồi chiêu của ô Hero **hàng trên cùng ở giữa** `(373, 92)` và mức máu tại mốc `50%` của thanh **Castle HP**. Khi máu `>= 50%` tool giữ nguyên không bấm phí; ngay khi máu tụt `< 50%` sẽ ưu tiên bấm Smith trước tiên.
+- **Mặc định bật `--humanize` khi chạy `--tap`** (có thể tắt bằng `--no-humanize`):
+  - Biến thiên tọa độ chạm theo phân phối chuẩn nằm gọn trong vùng an toàn của từng nút, kết hợp thời gian giữ ngón tay tự nhiên (`46–162ms`) và độ trượt vi mô (`0–2px`) thay vì lệnh `input tap` `0ms` cố định 1 điểm ảnh.
+  - Xáo trộn thứ tự bấm giữa các kỹ năng cùng nhóm ưu tiên (vẫn giữ **Smith khẩn cấp → 2 kỹ năng Town Archer bên trái → 9 Hero**), ngẫu nhiên hóa nhịp phản xạ giữa các lần bấm, nhịp nâng cấp và tự nghỉ ngắn vài giây ở màn chính sau mỗi `18–32` trận.
+  - Đặt tên file quay tạm trung lập trong Android (`/data/local/tmp/scr_*.mp4`) và tự xóa sạch sau mỗi lượt CAPTCHA.
 
 ### Bộ dò CAPTCHA độc lập
 

@@ -3,11 +3,15 @@
 import ctypes as ct
 from dataclasses import dataclass
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
 import sys
 from time import sleep
+
+
+_SYS_RNG = random.SystemRandom()
 
 
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -445,6 +449,55 @@ def adb_run(adb: Path, serial: str, *arguments, timeout=8) -> bytes:
             if _connect_tcp_adb(adb, serial):
                 return run(adb, "-s", serial, *arguments, timeout=timeout)
         raise
+
+
+def _jitter_offset(rng, radius: float) -> float:
+    if radius <= 0:
+        return 0.0
+    for _ in range(4):
+        val = rng.gauss(0.0, radius / 2.2)
+        if -radius <= val <= radius:
+            return val
+    return max(-radius, min(radius, rng.uniform(-radius * 0.7, radius * 0.7)))
+
+
+def human_tap(
+    adb: Path,
+    serial: str,
+    point: tuple[float, float],
+    *,
+    frame_size: tuple[int, int] | None = None,
+    viewport_size: tuple[int, int] = (1280, 720),
+    raw_point: bool = False,
+    jitter: tuple[float, float] = (6.0, 6.0),
+    rng=None,
+) -> tuple[int, int]:
+    """Send a humanized touch press with safe button jitter, hold duration, and micro-drift."""
+    gen = rng if rng is not None else _SYS_RNG
+    px = point[0] + _jitter_offset(gen, jitter[0])
+    py = point[1] + _jitter_offset(gen, jitter[1])
+    if not raw_point and frame_size is not None:
+        width, height = frame_size
+        x1 = round(px * width / viewport_size[0])
+        y1 = round(py * height / viewport_size[1])
+        max_x, max_y = width - 4, height - 4
+    else:
+        x1 = round(px)
+        y1 = round(py)
+        max_x = (frame_size[0] - 4) if frame_size else max(x1 + 4, 320)
+        max_y = (frame_size[1] - 4) if frame_size else max(y1 + 4, 180)
+    x1 = max(4, min(max_x, x1))
+    y1 = max(4, min(max_y, y1))
+
+    drift_choices = (-1, 0, 0, 0, 1, 2 if gen.random() < 0.2 else 0)
+    x2 = max(4, min(max_x, x1 + gen.choice(drift_choices)))
+    y2 = max(4, min(max_y, y1 + gen.choice(drift_choices)))
+    if gen.random() < 0.12:
+        duration_ms = gen.randint(115, 162)
+    else:
+        duration_ms = round(max(46.0, min(118.0, gen.gauss(74.0, 16.0))))
+    adb_run(adb, serial, "shell", "input", "swipe", str(x1), str(y1), str(x2), str(y2), str(duration_ms))
+    return x1, y1
 
 
 def parse_foreground_window(dumpsys_text: str) -> tuple[str | None, str | None]:

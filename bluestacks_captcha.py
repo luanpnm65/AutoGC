@@ -5,6 +5,7 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from queue import Empty, Full, Queue
+import random
 from shutil import copyfile
 import struct
 import subprocess
@@ -35,6 +36,7 @@ from emulator import (
     foreground_activity,
     format_instances,
     grab_game_window,
+    human_tap,
     resolve_target,
     run,
     target_window_handle,
@@ -45,6 +47,7 @@ from windows_video import read_video
 START_POINT = (925, 580)
 CAPTURE_FPS = 36
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_CAPTCHA_RNG = random.SystemRandom()
 
 
 class _RecordingUnavailableError(RuntimeError):
@@ -95,24 +98,45 @@ def matching_game_frame(adb, serial, captured_board):
     return frame, gem_position(board)
 
 
-def tap_point(adb, serial, frame, point):
-    x = round(point[0] * frame.width / VIEWPORT[0])
-    y = round(point[1] * frame.height / VIEWPORT[1])
-    adb_run(adb, serial, "shell", "input", "tap", str(x), str(y))
-    return x, y
+def tap_point(adb, serial, frame, point, *, jitter=None):
+    if jitter is None:
+        jitter = (15.0, 9.0) if point == START_POINT else (5.0, 6.0)
+    return human_tap(
+        adb,
+        serial,
+        point,
+        frame_size=frame.size,
+        viewport_size=VIEWPORT,
+        jitter=jitter,
+        rng=_CAPTCHA_RNG,
+    )
 
 
 def tap_cup(adb, serial, result, captured_board):
+    sleep(_CAPTCHA_RNG.uniform(0.18, 0.68))
     frame, gem = matching_game_frame(adb, serial, captured_board)
     if gem is not None:
         raise RuntimeError("The cups are no longer ready for a selection.")
-    x, y = tap_point(adb, serial, frame, result.coordinate)
+    x, y = tap_point(adb, serial, frame, result.coordinate, jitter=(5.0, 6.0))
     print(f"Sent one tap to {serial} at ({x}, {y}).", flush=True)
 
 
 def verify_start(frame, gem, start_screen):
     if gem is None or np.linalg.norm(gem - CENTER) >= 11 or not start_screen(frame):
         raise RuntimeError("The CAPTCHA Start button or centered diamond could not be verified.")
+
+
+def _prune_captcha_mp4_logs(logs: Path, keep: int = 10) -> None:
+    try:
+        mp4s = sorted(
+            logs.glob("growcastle-captcha-*.mp4"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in mp4s[keep:]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def keep_window_round(frames):
@@ -136,9 +160,11 @@ def solve_from_adb_recording(adb, serial, start_screen):
     initial = game_frame(adb, serial)
     initial_board = board_image(initial)
     verify_start(initial, gem_position(initial_board), start_screen)
-    remote = f"/data/local/tmp/growcastle-captcha-{uuid4().hex}.mp4"
+    token = uuid4().hex
+    remote = f"/data/local/tmp/scr_{token[:8]}.mp4"
+    rec_limit = str(_CAPTCHA_RNG.choice((5, 6)))
     recording = subprocess.Popen(
-        [str(adb), "-s", serial, "shell", "screenrecord", "--time-limit", "6", remote],
+        [str(adb), "-s", serial, "shell", "screenrecord", "--time-limit", rec_limit, remote],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         creationflags=_NO_WINDOW,
@@ -162,11 +188,12 @@ def solve_from_adb_recording(adb, serial, start_screen):
         else:
             raise _RecordingUnavailableError("ADB screen recording did not start.")
 
+        sleep(_CAPTCHA_RNG.uniform(0.10, 0.34))
         frame, gem = matching_game_frame(adb, serial, initial_board)
         verify_start(frame, gem, start_screen)
         if recording.poll() is not None:
             raise _RecordingUnavailableError("ADB screen recording ended before CAPTCHA Start.")
-        tap_point(adb, serial, frame, START_POINT)
+        tap_point(adb, serial, frame, START_POINT, jitter=(15.0, 9.0))
         tapped_start = True
         print("CAPTCHA: started during 60 FPS ADB screen recording.", flush=True)
         _, stderr = recording.communicate(timeout=9)
@@ -207,8 +234,9 @@ def solve_from_adb_recording(adb, serial, start_screen):
                 try:
                     logs = Path(__file__).with_name("logs")
                     logs.mkdir(exist_ok=True)
-                    saved = logs / Path(remote).name
+                    saved = logs / f"growcastle-captcha-{token}.mp4"
                     copyfile(local, saved)
+                    _prune_captcha_mp4_logs(logs, keep=10)
                     print(f"CAPTCHA: kept unselected round at {saved}", flush=True)
                 except OSError as exc:
                     print(f"CAPTCHA: could not keep the round recording: {exc}", flush=True)
@@ -357,9 +385,10 @@ def solve_from_adb_screencap_stream(adb, serial, start_screen):
         if detector.reference is None:
             raise RuntimeError("Centered diamond was not observed in raw screencap stream.")
 
+        sleep(_CAPTCHA_RNG.uniform(0.10, 0.34))
         check_frame, gem = matching_game_frame(adb, serial, last_board)
         verify_start(check_frame, gem, start_screen)
-        tap_point(adb, serial, check_frame, START_POINT)
+        tap_point(adb, serial, check_frame, START_POINT, jitter=(15.0, 9.0))
         started = True
         round_frames.append((warmup_times[-1], last_board))
         print("CAPTCHA: started during ADB raw screencap stream.", flush=True)
