@@ -716,21 +716,13 @@ class Player:
         self.next_break_waves = self.rng.randint(18, 32)
         self.break_logged = False
 
-    def _sample_skill_cooldown(self):
-        if not self.humanize:
-            return 0.30
-        if self.rng.random() < 0.10:
-            return self.rng.uniform(0.58, 0.92)
-        return self.rng.uniform(0.28, 0.54)
-
     def _roll_reaction_delays(self, prev_screen, new_screen):
+        self.battle_delay = 0.45
         if not self.humanize:
-            self.battle_delay = 0.45
             self.home_delay = 0.85
             self.menu_delay = 0.20
             self.victory_wait = 1.60
             return
-        self.battle_delay = self.rng.uniform(0.45, 0.88)
         self.menu_delay = self.rng.uniform(0.24, 0.56)
         self.victory_wait = self.rng.uniform(1.60, 2.25)
         if new_screen == "battle":
@@ -906,12 +898,11 @@ class Player:
             self.report(time, "Unknown screen: waiting for the main screen or a battle")
             self.wait_notified = True
         if name == "battle":
-            if screen.mimic is not None and age >= self.menu_delay:
+            if screen.mimic is not None and age >= 0.20:
                 if action := self.collect_mimic(time, screen.mimic):
                     self.last_skill = time
-                    self.skill_cooldown = self._sample_skill_cooldown()
                     return action
-            if age < self.battle_delay:
+            if age < 0.45:
                 return None
             return self.cast(
                 time,
@@ -973,29 +964,20 @@ class Player:
             self.skills_used[index] = 0 if index in ready else self.skills_used[index] + 1
             if self.skills_used[index] >= 2:
                 del self.skills_used[index]
-        if time - self.last_skill < self.skill_cooldown:
+        if time - self.last_skill < 0.30:
             return None
         if smith_ready and hp_low and "smith" not in self.skills_used:
             self.skills_used["smith"] = 0
             self.last_skill = time
-            self.skill_cooldown = self._sample_skill_cooldown()
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
-        candidates = [idx for idx in ready if idx not in self.skills_used]
-        if not candidates:
-            return None
-        if self.humanize and len(candidates) > 1:
-            archers = [idx for idx in candidates if idx < len(ARCHER_SKILLS)]
-            heroes = [idx for idx in candidates if idx >= len(ARCHER_SKILLS)]
-            self.rng.shuffle(archers)
-            self.rng.shuffle(heroes)
-            candidates = archers + heroes
-        index = candidates[0]
-        self.skills_used[index] = 0
-        self.last_skill = time
-        self.skill_cooldown = self._sample_skill_cooldown()
-        label, x, _, y = SKILLS[index]
-        return Action(f"cast {label}", (x, y))
+        for index in ready:
+            if index not in self.skills_used:
+                self.skills_used[index] = 0
+                self.last_skill = time
+                label, x, _, y = SKILLS[index]
+                return Action(f"cast {label}", (x, y))
+        return None
 
 
 _PLAY_RNG = random.SystemRandom()
@@ -1028,8 +1010,7 @@ def adb_frames(adb, serial, seconds, *, humanize=True):
         raw = adb_run(adb, serial, "exec-out", "screencap", "-p")
         with Image.open(BytesIO(raw)) as screen:
             yield sample - start, screen.copy()
-        interval = _PLAY_RNG.uniform(0.20, 0.30) if humanize else 0.22
-        sleep(max(0, interval - (monotonic() - sample)))
+        sleep(max(0, 0.22 - (monotonic() - sample)))
 
 
 def replay_frames(video):
@@ -1198,6 +1179,7 @@ def play(args, target, report, journal):
                             viewport_size=VIEWPORT,
                             raw_point=action.raw_point,
                             jitter=action_jitter(action),
+                            duration_range=(35, 60) if action.name.startswith("cast ") else None,
                             rng=_PLAY_RNG,
                         )
                     else:

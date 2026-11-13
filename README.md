@@ -167,8 +167,8 @@ Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc 
 
 - **Tự cast Smith khi máu lâu đài `< 50%`**: Tool theo dõi thanh hồi chiêu của ô Hero **hàng trên cùng ở giữa** `(373, 92)` và mức máu tại mốc `50%` của thanh **Castle HP**. Khi máu `>= 50%` tool giữ nguyên không bấm phí; ngay khi máu tụt `< 50%` sẽ ưu tiên bấm Smith trước tiên.
 - **Mặc định bật `--humanize` khi chạy `--tap`** (có thể tắt bằng `--no-humanize`):
-  - Biến thiên tọa độ chạm theo phân phối chuẩn nằm gọn trong vùng an toàn của từng nút, kết hợp thời gian giữ ngón tay tự nhiên (`46–162ms`) và độ trượt vi mô (`0–2px`) thay vì lệnh `input tap` `0ms` cố định 1 điểm ảnh.
-  - Xáo trộn thứ tự bấm giữa các kỹ năng cùng nhóm ưu tiên (vẫn giữ **Smith khẩn cấp → 2 kỹ năng Town Archer bên trái → 9 Hero**), ngẫu nhiên hóa nhịp phản xạ giữa các lần bấm, nhịp nâng cấp và tự nghỉ ngắn vài giây ở màn chính sau mỗi `18–32` trận.
+  - **Giữ nguyên thứ tự và nhịp cast skill như bản gốc**: bấm cố định theo đúng thứ tự **Smith (`HP < 50%`) → Archer 1 → Archer 2 → Hero 1..9** (trái sang phải, trên xuống dưới) với khoảng cách cố định **`0.30s`** giữa các skill, độ trễ vào trận **`0.45s`** và chu kỳ chụp khung hình **`0.22s`** để đảm bảo đúng chuỗi combo tướng.
+  - **Chạm lệch tâm chống bot**: các cú bấm ô skill dùng chạm nhanh **`35–60ms`** kèm lệch tọa độ nhẹ trong phạm vi ô để không làm trễ nhịp `0.30s`; các nút ngoài trận, nâng cấp, quảng cáo và CAPTCHA giữ chạm tự nhiên (`46–162ms`), độ trượt vi mô (`0–2px`), biến thiên nhịp phản xạ ngoài trận và tự nghỉ ngắn vài giây ở màn chính sau mỗi `18–32` trận.
   - Đặt tên file quay tạm trung lập trong Android (`/data/local/tmp/scr_*.mp4`) và tự xóa sạch sau mỗi lượt CAPTCHA.
 
 ### Bộ dò CAPTCHA độc lập
@@ -205,7 +205,7 @@ Nếu vẫn muốn chạy trên LDPlayer 9, thêm `--emulator ldplayer` hoặc t
 | | `--video FILE` | — | Chạy thử/xem trước quyết định trên file video `.mp4`. |
 | **Tự động & chống bot** | `--ads` / `--no-ads` | `--ads` | Bật / tắt tự mở và đóng quảng cáo thưởng vàng **GET**. |
 | | `--auto-captcha` / `--no-auto-captcha` | `--auto-captcha` | Bật / tắt tự giải CAPTCHA cốc kim cương khi chạy `--tap`. |
-| | `--humanize` / `--no-humanize` | `--humanize` | Bật / tắt giả lập ngón tay người thật, xáo trộn nhịp bấm & nghỉ ngắn chống phát hiện bot. |
+| | `--humanize` / `--no-humanize` | `--humanize` | Bật / tắt lệch tọa độ chạm tự nhiên, biến thiên thời gian ngoài trận & nghỉ ngắn chống phát hiện bot. |
 | **Nâng cấp kim cương** | `--upgrade-hero [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Hero ô góc trên phải `(461, 92)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
 | | `--upgrade-tower [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Tháp tầng 2 lâu đài `(380, 366)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
 | | `--upgrade-gems GEMS` | — | Ghi đè mốc kim cương trắng kích hoạt cho `--upgrade-hero` / `--upgrade-tower`. |
