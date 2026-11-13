@@ -119,7 +119,7 @@ Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` (nâng Hero g�
    - Với `--upgrade-tower`: tool bấm ô chuyển tầng tháp `(380, 457)` rồi mở ô tầng tháp thứ hai từ dưới lên `(380, 366)` (nhận diện mọi loại tháp lâu đài đang gắn tại ô đó như Lightning, Minigun, Ballista, Cannon, Shield, Gold...).
 2. Tool đọc cấp hiện tại và giá kim cương trên nút **LV UP** (`💎 1`, `2` hoặc `3` kim cương) tại `(896, 470)`. Sau khi nâng 10 cấp và thanh **`LV UP +10`** bật lên ở phía dưới, nếu số kim cương trắng còn lại đủ cho nút **LV UP +10** (`💎 10`, `20`...) và số cấp cần nâng còn từ `10` trở lên thì tool tự động bấm **LV UP +10** `(405, 628)` để tiết kiệm thời gian; khi kim cương trắng còn ít hơn giá `+10` thì tự quay về bấm **LV UP** đơn cho đến hết kim cương trắng.
 3. Sau mỗi lần bấm (`+1` hoặc `+10`), tool xác nhận cấp tăng đúng tương ứng và số kim cương trắng giảm đúng giá vừa đọc. Đợt nâng kết thúc khi đủ số cấp mục tiêu (`max(50, mốc kim cương)`, hoặc tùy chỉnh bằng `--upgrade-levels`), hoặc dừng sớm ngay khi số kim cương trắng còn lại nhỏ hơn giá nâng tiếp theo để **không bao giờ trừ lẹm vào phần kim cương cam (`+500`)**.
-4. Tool bấm nút **X** `(994, 160)` để đóng bảng thông tin Hero/Tháp, bấm tiếp nút **X** `(1247, 76)` để đóng danh sách Hero/Tháp bên phải (khôi phục lại giao diện ô Hero nếu vừa nâng Tháp), rồi tiếp tục đánh theo chế độ đang chọn.
+4. Tool bấm nút **X** `(994, 160)` để đóng bảng thông tin Hero/Tháp, bấm tiếp nút **X** `(1247, 76)` để đóng danh sách Hero/Tháp bên phải (khôi phục lại giao diện ô Hero nếu vừa nâng Tháp), rồi tiếp tục đánh theo chế độ đang chọn. Nếu có cú bấm bị hụt nhịp hoặc gặp bất kỳ lỗi đọc số liệu nào giữa chừng, tool tự động thử bấm lại hoặc đóng toàn bộ bảng nâng cấp để thoát ra màn chính và tiếp tục đi wave theo chế độ đã chọn (không bị kẹt lại trong bảng nâng cấp).
 
 ### Quảng cáo thưởng vàng
 
@@ -142,22 +142,24 @@ Tool mặc định tự xem quảng cáo thưởng vàng. Dùng `--ads` để b�
    - Tự gửi phím **BACK** của Android nếu quảng cáo tự bật bảng Google Play đè lên hoặc bị kẹt ở màn kết thúc sau khi đã hết giờ.
 4. Game tự cộng vàng khi quay lại màn chính (`gold HUD changed`).
 
-### Tự giải CAPTCHA trong auto play
+### Tự giải CAPTCHA cốc kim cương
+
+Tính năng **mặc định bật sẵn** mỗi khi chạy kèm `--tap` (có thể truyền rõ `--auto-captcha` hoặc tắt bằng `--no-auto-captcha`).
 
 ```powershell
-# Đánh wave mới và tự giải CAPTCHA
-.\.venv\Scripts\python.exe autoplay.py --mode wave --tap --auto-captcha
+# Tự đánh + tự nâng Hero + tự giải CAPTCHA (mặc định bật sẵn khi có --tap)
+.\.venv\Scripts\python.exe autoplay.py --serial 127.0.0.1:5555 --mode replay --tap --upgrade-hero 30
 
-# Replay trên nhiều instance và tự giải CAPTCHA
-.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --auto-captcha
+# Nếu muốn tắt tự giải CAPTCHA để tự chọn bằng tay
+.\.venv\Scripts\python.exe autoplay.py --mode wave --tap --no-auto-captcha
 ```
 
-Tool hỗ trợ 3 tầng thu hình CAPTCHA theo thứ tự ưu tiên:
-1. **Chụp khung game 16:9 của cửa sổ BlueStacks 5** (hoạt động cho cả các cửa sổ xếp cạnh nhau trên màn hình dù không phải cửa sổ đang active chuột, hoặc qua `PrintWindow` khi bị che trên chế độ DirectX).
-2. **Ghi hình ngắn qua `adb shell screenrecord`** bên trong Android nếu cửa sổ đang thu nhỏ hoặc không chụp được.
-3. **Luồng `adb exec-out screencap` thô tốc độ cao** nếu bản Android của BlueStacks 5 không hỗ trợ bộ mã hóa video của `screenrecord` (tool tự đo tốc độ khung hình trước khi bấm **Start** để không làm mất lượt nếu máy quá tải).
+Tool hỗ trợ 3 tầng thu hình CAPTCHA theo thứ tự ưu tiên để đạt độ chính xác cao nhất:
+1. **Quay trực tiếp 60 FPS bên trong Android qua `adb shell screenrecord` (ưu tiên mặc định)**: lấy trọn vẹn chuyển động ~60 FPS mượt mà, **hoàn toàn không dính các nút phím ảo (`B`, `N`, `M`) của BlueStacks**, không bị đen hình trên OpenGL/Vulkan và giải được ngay cả khi cửa sổ giả lập đang bị cửa sổ khác che khuất hoặc chạy nhiều instance cùng lúc.
+2. **Luồng `adb exec-out screencap` thô tốc độ cao** nếu bản Android của giả lập không hỗ trợ `screenrecord`.
+3. **Chụp khung game 16:9 của cửa sổ giả lập trên Windows** làm phương án dự phòng cuối.
 
-Khi tool đã bắt đầu lượt mà chưa gửi được cú chọn cốc, bản ghi được lưu trong `logs` (MP4 hoặc NPZ) để kiểm tra lại bằng `captcha.py`.
+Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc hiện lại nút **START**, tool tự thử lại tối đa 3 lần trước khi tạm dừng chờ người chơi. Bản ghi lượt chưa chọn được lưu trong `logs` để kiểm tra lại bằng `captcha.py`.
 
 ### Bộ dò CAPTCHA độc lập
 

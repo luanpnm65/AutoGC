@@ -118,8 +118,6 @@ class TowerUpgrade:
                     batch = None
                 if batch is not None:
                     if not batch.closed and batch.pending_cost is None and not batch.done:
-                        # A previous run exited cleanly or stopped with no tap in flight;
-                        # start fresh so manual gameplay in between never causes a mismatch.
                         batch = None
                     else:
                         if batch.confirmed >= self.upgrade_count or batch.closed:
@@ -135,6 +133,10 @@ class TowerUpgrade:
         self.observation = None
         self.since = 0
         self.unverified_since = None
+        self.last_seen_time = 0.0
+        self.pending_since = None
+        self.missed_taps = 0
+        self.close_retries = 0
 
     def save(self):
         if self.journal is not None:
@@ -151,25 +153,56 @@ class TowerUpgrade:
         self.navigation = None
         self.observation = None
         self.unverified_since = None
+        self.pending_since = None
         if not self.active and self.batch is not None:
             self.rearmed_by_battle = True
 
-    def wait_for_reading(self, time, message):
+    def _abort_to_home(self, time, name, layout, message):
+        """Abort the current upgrade batch and exit cleanly back to Home so waves resume."""
+        self.report(time, f"{message} Exiting upgrade menu to resume play.")
+        if self.batch is None:
+            self.batch = Batch(self.gem_threshold, 1, self.restore_hero, done=True)
+        else:
+            self.batch.pending_cost = None
+            self.batch.pending_levels = 1
+            self.batch.done = True
+        self.save()
+        self.navigation = None
+        self.unverified_since = None
+        self.pending_since = None
+        self.missed_taps = 0
+        return self.finish(time, name, layout)
+
+    def wait_for_reading(self, time, name, layout, message):
         if self.unverified_since is None:
             self.unverified_since = time
-        elif time - self.unverified_since > 5:
-            raise RuntimeError(message)
+        elif time - self.unverified_since > 4.5:
+            if self.batch is not None and self.batch.done:
+                # Already trying to exit: force-clear state so main Player loop takes over.
+                self.batch.closed = True
+                self.save()
+                self.active = False
+                self.navigation = None
+                self.unverified_since = None
+                self.report(time, f"{message} Returning control to wave loop.")
+                return False, None
+            return self._abort_to_home(time, name, layout, message)
         return True, None
 
     def _complete_batch(self, time, name, layout, early_reason=None):
         if self.batch is not None and not self.batch.done:
+            self.batch.pending_cost = None
+            self.batch.pending_levels = 1
             self.batch.done = True
             self.save()
             if early_reason:
                 self.report(time, early_reason)
+        self.pending_since = None
+        self.missed_taps = 0
         return self.finish(time, name, layout)
 
     def feed(self, time, screen):
+        self.last_seen_time = time
         reading = (
             screen.name,
             screen.gems,
@@ -200,6 +233,8 @@ class TowerUpgrade:
                 return False, None
             self.active = True
             self.rearmed_by_battle = False
+            self.close_retries = 0
+            self.missed_taps = 0
             self.report(
                 time,
                 f"{self.label} upgrade triggered at {gems} white gems (threshold {self.gem_threshold})",
@@ -212,12 +247,31 @@ class TowerUpgrade:
                 if not stable:
                     return True, None
                 self.navigation = None
-            elif time - started > 5:
-                raise RuntimeError(f"{self.label} upgrade stopped while waiting for {expected}.")
+                self.close_retries = 0
+            elif time - started > 4.0:
+                self.navigation = None
+                if self.batch is not None and self.batch.done:
+                    self.close_retries += 1
+                    if self.close_retries <= 3:
+                        return self.finish(time, name, layout)
+                    self.batch.closed = True
+                    self.save()
+                    self.active = False
+                    self.report(
+                        time,
+                        f"{self.label} close menu timed out; returning control to wave loop.",
+                    )
+                    return False, None
+                return self._abort_to_home(
+                    time, name, layout,
+                    f"{self.label} upgrade timed out while waiting for {expected}.",
+                )
             else:
                 return True, None
         if not stable:
-            return self.wait_for_reading(time, f"{self.label} upgrade stopped: screen did not stabilize.")
+            return self.wait_for_reading(
+                time, name, layout, f"{self.label} upgrade paused: screen did not stabilize."
+            )
 
         if self.batch is not None and (self.batch.done or self.batch.confirmed >= self.upgrade_count):
             return self.finish(time, name, layout)
@@ -247,7 +301,8 @@ class TowerUpgrade:
 
         if name != "tower" or gems is None or level is None:
             return self.wait_for_reading(
-                time, f"{self.label} upgrade stopped: open the verified {self.label} detail panel."
+                time, name, layout,
+                f"{self.label} upgrade could not verify the {self.label} detail panel.",
             )
 
         if self.batch is not None and self.recovered_pending:
@@ -277,7 +332,8 @@ class TowerUpgrade:
             )
             if not can_bulk and cost not in VALID_COSTS:
                 return self.wait_for_reading(
-                    time, f"{self.label} upgrade stopped: single-upgrade diamond price is unverified."
+                    time, name, layout,
+                    f"{self.label} upgrade could not read single-upgrade diamond price.",
                 )
             if not can_bulk and gems < cost:
                 return self._complete_batch(
@@ -289,39 +345,64 @@ class TowerUpgrade:
 
         batch = self.batch
         if batch.pending_cost is not None:
-            if (gems, level) != (
+            expected_after = (
                 batch.gems - batch.pending_cost,
                 batch.level + batch.pending_levels,
-            ):
-                return self.wait_for_reading(
-                    time, f"{self.label} upgrade stopped at {batch.confirmed}/{self.upgrade_count}: "
-                    "last tap is unconfirmed; inspect the level and gem balance before restarting."
-                )
-            step_done = batch.pending_levels
-            batch.gems, batch.level = gems, level
-            batch.pending_cost = None
-            batch.pending_levels = 1
-            batch.confirmed += step_done
-            self.save()
-            step_tag = f" (+{step_done})" if step_done > 1 else ""
-            self.report(
-                time,
-                f"{self.label} {batch.confirmed}/{self.upgrade_count}{step_tag} confirmed "
-                f"(level {level}, {gems} white gems)",
             )
-            self.unverified_since = None
-            if batch.confirmed >= self.upgrade_count:
-                return self._complete_batch(time, name, layout)
-            if gems == 0 or (cost in VALID_COSTS and gems < cost):
-                return self._complete_batch(
-                    time, name, layout,
-                    f"{self.label} stopped at {batch.confirmed}/{self.upgrade_count} "
-                    f"({gems} white gems remaining): closing menu",
+            if (gems, level) != expected_after:
+                # If neither level nor gem balance changed after ~0.85s, the game
+                # ignored the tap during card bounce; clear pending and retry cleanly.
+                if (gems, level) == (batch.gems, batch.level):
+                    if self.pending_since is None:
+                        self.pending_since = time
+                    elif time - self.pending_since >= 0.85:
+                        self.missed_taps += 1
+                        if self.missed_taps <= 3:
+                            batch.pending_cost = None
+                            batch.pending_levels = 1
+                            self.pending_since = None
+                            self.unverified_since = None
+                            self.save()
+                        else:
+                            return self._abort_to_home(
+                                time, name, layout,
+                                f"{self.label} upgrade tap ignored {self.missed_taps} times at "
+                                f"{batch.confirmed}/{self.upgrade_count}.",
+                            )
+                if batch.pending_cost is not None:
+                    return self.wait_for_reading(
+                        time, name, layout,
+                        f"{self.label} upgrade unconfirmed at {batch.confirmed}/{self.upgrade_count}.",
+                    )
+            else:
+                step_done = batch.pending_levels
+                batch.gems, batch.level = gems, level
+                batch.pending_cost = None
+                batch.pending_levels = 1
+                batch.confirmed += step_done
+                self.pending_since = None
+                self.missed_taps = 0
+                self.save()
+                step_tag = f" (+{step_done})" if step_done > 1 else ""
+                self.report(
+                    time,
+                    f"{self.label} {batch.confirmed}/{self.upgrade_count}{step_tag} confirmed "
+                    f"(level {level}, {gems} white gems)",
                 )
+                self.unverified_since = None
+                if batch.confirmed >= self.upgrade_count:
+                    return self._complete_batch(time, name, layout)
+                if gems == 0 or (cost in VALID_COSTS and gems < cost):
+                    return self._complete_batch(
+                        time, name, layout,
+                        f"{self.label} stopped at {batch.confirmed}/{self.upgrade_count} "
+                        f"({gems} white gems remaining): closing menu",
+                    )
 
         if (gems, level) != (batch.gems, batch.level):
             return self.wait_for_reading(
-                time, f"{self.label} upgrade stopped: level or balance is unverified."
+                time, name, layout,
+                f"{self.label} level or gem balance changed unexpectedly.",
             )
         if gems == 0 or (cost in VALID_COSTS and gems < cost):
             return self._complete_batch(
@@ -342,7 +423,8 @@ class TowerUpgrade:
 
         if cost not in VALID_COSTS:
             return self.wait_for_reading(
-                time, f"{self.label} upgrade stopped: single-upgrade diamond price is unverified."
+                time, name, layout,
+                f"{self.label} single-upgrade diamond price is unverified.",
             )
 
         self.unverified_since = None
@@ -370,6 +452,7 @@ class TowerUpgrade:
             raise RuntimeError(f"{self.label} upgrade stopped: journal and planned tap disagree.")
         batch.pending_cost = step_cost
         batch.pending_levels = step_levels
+        self.pending_since = self.last_seen_time
         self.save()
 
     def finish(self, time, name, layout):
@@ -389,5 +472,5 @@ class TowerUpgrade:
                 self.active = False
                 return True, None
         return self.wait_for_reading(
-            time, f"{self.label} upgrade finished; close the menu manually."
+            time, name, layout, f"{self.label} upgrade finished; waiting for menu to close."
         )

@@ -170,6 +170,109 @@ class Result:
         return None
 
 
+def _step_rotation(a1, a2):
+    """Physical cup rotation modulo 180-degree upside-down cylinder symmetry."""
+    return min(
+        angle_distance(a2, a1),
+        angle_distance((a2 + 180) % 360, a1),
+    )
+
+
+def _select_by_unique_spin_chain(observations, end_time):
+    """Eliminate twin-angle decoy groups by tracing all 8 settled slots backward.
+
+    Grow Castle partitions empty decoy cups into groups of >= 2 cups that share
+    identical rotation curves angle(t), while the diamond cup follows a unique,
+    faster rotation curve right up to settling. Joint 1-to-1 pose assignment and
+    180-degree cylinder-symmetry unwrapping prevent crossed tracks and flip noise.
+    """
+    start_time = observations[0].time
+    n_slots = len(SLOTS)
+    chains = {slot: {} for slot in range(n_slots)}
+    pos = {slot: SLOTS[slot].astype(np.float64) for slot in range(n_slots)}
+    vel = {slot: np.zeros(2, dtype=np.float64) for slot in range(n_slots)}
+    last_seen = {slot: observations[-1].time for slot in range(n_slots)}
+
+    for idx in range(len(observations) - 1, -1, -1):
+        obs = observations[idx]
+        if not obs.poses:
+            continue
+        pairs = []
+        for slot in range(n_slots):
+            dt = last_seen[slot] - obs.time
+            if dt > 0.22:
+                continue
+            pred = pos[slot] - 0.55 * vel[slot] * dt
+            for pi, pose in enumerate(obs.poses):
+                d_pred = pose.distance(pred)
+                if d_pred <= 14 and pose.distance(pos[slot]) <= 16:
+                    pairs.append((d_pred, slot, pi))
+        pairs.sort(key=lambda item: item[0])
+        used_slots = set()
+        used_poses = set()
+        for _, slot, pi in pairs:
+            if slot in used_slots or pi in used_poses:
+                continue
+            used_slots.add(slot)
+            used_poses.add(pi)
+            pose = obs.poses[pi]
+            dt = last_seen[slot] - obs.time
+            if dt > 1e-3:
+                vel[slot] = 0.55 * vel[slot] + 0.45 * ((pos[slot] - np.array(pose.position)) / dt)
+            pos[slot] = np.array(pose.position, dtype=np.float64)
+            last_seen[slot] = obs.time
+            chains[slot][idx] = pose
+
+    late_time = start_time + 0.30 * (end_time - start_time)
+    late_indices = [i for i, obs in enumerate(observations) if obs.time >= late_time]
+    spin_frames = {}
+    late_rotation = {}
+    for slot in range(n_slots):
+        spinning = [
+            i for i in late_indices
+            if i in chains[slot] and chains[slot][i].score >= 0.70
+            and _step_rotation(0, chains[slot][i].angle) >= 25
+        ]
+        spin_frames[slot] = spinning
+        angles = [chains[slot][i].angle for i in late_indices if i in chains[slot]]
+        late_rotation[slot] = sum(_step_rotation(a1, a2) for a1, a2 in zip(angles, angles[1:]))
+
+    twin_ratio = {}
+    for slot in range(n_slots):
+        spinning = spin_frames[slot]
+        best_match = 0.0
+        if spinning:
+            min_overlap = max(3, int(0.55 * len(spinning)))
+            for other in range(n_slots):
+                if other == slot:
+                    continue
+                overlap = [i for i in spinning if i in chains[other]]
+                if len(overlap) >= min_overlap:
+                    same = sum(
+                        1 for i in overlap
+                        if _step_rotation(chains[slot][i].angle, chains[other][i].angle) <= 15
+                    )
+                    best_match = max(best_match, same / len(overlap))
+        twin_ratio[slot] = best_match
+
+    high_fps = len(observations) >= 45
+    min_spin = 6 if high_fps else 3
+    min_rot = 260 if high_fps else 220
+    max_board_rot = max(late_rotation.values(), default=0)
+    solos = [
+        slot for slot in range(n_slots)
+        if twin_ratio[slot] <= 0.58
+        and len(spin_frames[slot]) >= min_spin
+        and late_rotation[slot] >= min_rot
+    ]
+    solos.sort(key=lambda s: (late_rotation[s], len(spin_frames[s])), reverse=True)
+    if solos and late_rotation[solos[0]] >= max_board_rot:
+        best = solos[0]
+        if len(solos) == 1 or late_rotation[best] >= 1.4 * late_rotation[solos[1]]:
+            return best, len(spin_frames[best])
+    return None, 0
+
+
 def select_final(observations, initial_slot, end_time):
     if initial_slot is None:
         return None, 0, "no visible diamond entry"
@@ -177,7 +280,7 @@ def select_final(observations, initial_slot, end_time):
     initial = SLOTS[initial_slot]
     early = []
     for obs in observations:
-        if obs.time - start_time > 0.16:
+        if obs.time - start_time > 0.20:
             break
         near = [pose for pose in obs.outliers(0.73) if pose.distance(initial) <= 18
                 and angle_distance(pose.angle, obs.common_angle) >= 45]
@@ -186,29 +289,38 @@ def select_final(observations, initial_slot, end_time):
     if not early:
         return None, 0, "no fast spin matched the diamond entry"
 
+    chain_slot, chain_support = _select_by_unique_spin_chain(observations, end_time)
+    if chain_slot is not None:
+        return chain_slot, chain_support, ""
+
     # Trace strong angular outliers forward into an upright slot. When all cups
     # match the upright template again, spatial continuity carries their identity.
     votes = {slot: {} for slot in range(len(SLOTS))}
     individual = {slot: {} for slot in range(len(SLOTS))}
-    late = start_time + 0.30 * (end_time - start_time)
+    late = start_time + 0.28 * (end_time - start_time)
     for i, obs in enumerate(observations):
         if obs.time < late:
             continue
         for seed in obs.outliers(0.71):
             current = seed
+            vel = np.zeros(2, dtype=np.float64)
             last_seen = obs.time
             for later in observations[i + 1:]:
-                if later.time - last_seen > 0.16:
+                dt = later.time - last_seen
+                if dt > 0.18:
                     break
                 if later.poses:
-                    nearest = min(later.poses, key=lambda p: p.distance(current.position))
-                    if nearest.distance(current.position) <= 10:
+                    predicted = np.array(current.position, dtype=np.float64) + 0.55 * vel * dt
+                    nearest = min(later.poses, key=lambda p: p.distance(predicted))
+                    if nearest.distance(predicted) <= 12 and nearest.distance(current.position) <= 14:
+                        if dt > 1e-3:
+                            vel = 0.6 * vel + 0.4 * (np.subtract(nearest.position, current.position) / dt)
                         current = nearest
                         last_seen = later.time
-            if end_time - last_seen > 0.16:
+            if end_time - last_seen > 0.18:
                 continue
             slot = int(np.argmin(np.linalg.norm(SLOTS - current.position, axis=1)))
-            if current.distance(SLOTS[slot]) <= 8:
+            if current.distance(SLOTS[slot]) <= 9:
                 if seed.score >= 0.75:
                     votes[slot][i] = max(seed.score, votes[slot].get(i, 0))
                 if sum(angle_distance(seed.angle, p.angle) <= 15 for p in obs.poses) == 1:
@@ -235,9 +347,13 @@ def select_final(observations, initial_slot, end_time):
 
     # Multiple ordinary cups can share a secondary rotation. In an ambiguous
     # round, require an independently rotating path along the direction the
-    # verified entry cup began moving.
+    # verified entry cup began moving (allowing slight spring overshoot near settle).
     candidates = []
-    early_delta = np.subtract(early[-1].position, early[0].position)
+    early_delta = (
+        np.subtract(early[-1].position, early[0].position)
+        if len(early) >= 2
+        else np.subtract(early[0].position, initial)
+    )
     for slot, seeds in individual.items():
         displacement = SLOTS[slot] - initial
         axis = int(np.argmax(np.abs(displacement)))
@@ -248,16 +364,16 @@ def select_final(observations, initial_slot, end_time):
         for i, pose in seeds.items():
             offset = np.subtract(pose.position, initial)
             progress = offset[axis] / displacement[axis]
-            if not 0.3 <= progress <= 1.15 or abs(offset[1 - axis] - progress * displacement[1 - axis]) > 27:
+            if not 0.25 <= progress <= 1.48 or abs(offset[1 - axis] - min(progress, 1.0) * displacement[1 - axis]) > 27:
                 continue
             if not track or pose.position != track[-1][1].position or pose.angle != track[-1][1].angle:
                 track.append((observations[i].time, pose))
-        if (len(track) >= 5 and track[-1][0] - track[0][0] >= 0.13
+        if (len(track) >= 4 and track[-1][0] - track[0][0] >= 0.12
                 and len({pose.angle for _, pose in track}) >= 4
                 and np.mean([pose.score for _, pose in track]) >= 0.74
                 and sum(pose.score >= 0.78 for _, pose in track) >= 2
-                and all(t2 - t1 <= 0.13 and p2.distance(p1.position) <= 12
-                        and (p2.position[axis] - p1.position[axis]) * direction >= -3
+                and all(t2 - t1 <= 0.18 and p2.distance(p1.position) <= 15
+                        and (p2.position[axis] - p1.position[axis]) * direction >= -5
                         for (t1, p1), (t2, p2) in zip(track, track[1:]))):
             candidates.append((slot, len(track)))
     if len(candidates) == 1:
@@ -340,7 +456,7 @@ def format_result(result):
 
 
 def analyze_video(path):
-    detector = Detector(sample_interval=0.017)
+    detector = Detector(sample_interval=0.012)
     if Path(path).suffix.lower() == ".npz":
         with np.load(path, allow_pickle=False) as recording:
             times, boards = recording["times"], recording["boards"]
