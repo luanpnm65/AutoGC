@@ -95,6 +95,7 @@ BOSS_GLYPH = (
     "@@.........@@@@@......@@@@.........@@@.........@@",
     "..@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
 )
+SMITH_SKILL = ("Smith (HP < 50%)", 373, 51, 92)
 ARCHER_SKILLS = (
     ("archer skill 1", 135, 363, 405),
     ("archer skill 2", 135, 480, 522),
@@ -182,6 +183,8 @@ class Screen:
     bulk_cost: int | None = None
     mimic: tuple[int, int] | None = None
     skip_30: bool = False
+    smith_ready: bool = False
+    hp_low: bool = False
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -394,6 +397,26 @@ class Vision:
         health = (red > (65 if dim else 130)) & (red - blue > (35 if dim else 80))
         return health.sum() < 6 and pale_pixels(bar, threshold).sum() < 8
 
+    @staticmethod
+    def castle_hp_low(rgb):
+        """Return True when un-dimmed Castle HP bar (x=615..937, 50% at x=776) is below 50%."""
+        if (rgb[8:28, 616:645].min(axis=2) > 175).mean() < 0.16:
+            return False
+        mid_bar = rgb[10:25, 776:788]
+        red, _, blue = mid_bar.transpose(2, 0, 1)
+        return float(((red > 140) & (red - blue > 70)).mean()) < 0.15
+
+    @staticmethod
+    def smith_skill_ready(rgb):
+        """Check cyan skill bar for top-row middle Hero (Smith at x=373, y_bar≈51)."""
+        _, x, _, _ = SMITH_SKILL
+        sr, sg, sb = rgb[44:59, x - 24:x + 25].transpose(2, 0, 1)
+        cyan = (sb > 164) & (sg > 105) & (sb - sr > 65) & (sg - sr > 50)
+        return any(
+            float(cyan[dy:dy + 4].mean()) >= 0.90
+            for dy in range(cyan.shape[0] - 3)
+        )
+
     def reward_close(self, image):
         # Search only the player chrome for the full label and the adjoining X.
         left, top = 902, 8
@@ -520,7 +543,13 @@ class Vision:
                 cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
                 if cyan.mean() >= 0.92:
                     ready.append(index)
-            return Screen("battle", ready=tuple(ready), mimic=self.find_mimic(rgb))
+            return Screen(
+                "battle",
+                ready=tuple(ready),
+                mimic=self.find_mimic(rgb),
+                smith_ready=self.smith_skill_ready(rgb),
+                hp_low=self.castle_hp_low(rgb),
+            )
         return Screen("unknown")
 
     def classify(
@@ -605,6 +634,7 @@ class Player:
         self.gold_before = None
         self.after_victory = False
         self.skills_used = {}
+        self.smith_used_at = None
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
         self.mimic_taps = 0
@@ -725,6 +755,7 @@ class Player:
             self.report(time, "Castle HP reached zero: switched to Replay")
         if name == "victory":
             self.skills_used.clear()
+            self.smith_used_at = None
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
@@ -768,7 +799,14 @@ class Player:
             if screen.mimic is not None and age >= 0.12:
                 if action := self.collect_mimic(time, screen.mimic):
                     return action
-            return self.cast(time, screen.ready) if age >= 0.12 else None
+            if age < 0.12:
+                return None
+            return self.cast(
+                time,
+                screen.ready,
+                smith_ready=screen.smith_ready,
+                hp_low=screen.hp_low,
+            )
         if self.acted or age < 0.20:
             return None
         if name == "skip":
@@ -792,6 +830,7 @@ class Player:
                 action = Action("restore hero slots", EXIT_LAYER_VIEW)
             else:
                 self.skills_used.clear()
+                self.smith_used_at = None
                 if self.mode == "wave":
                     action = Action("start next Battle", (1191, 648))
                 else:
@@ -801,7 +840,12 @@ class Player:
         self.acted = True
         return action
 
-    def cast(self, time, ready):
+    def cast(self, time, ready, *, smith_ready=False, hp_low=False):
+        if not smith_ready:
+            self.smith_used_at = None
+        elif self.smith_used_at is not None and self.live and time - self.smith_used_at >= 0.38:
+            self.smith_used_at = None
+
         ready_set = set(ready)
         for index in tuple(self.skills_used):
             if index not in ready_set:
@@ -812,6 +856,11 @@ class Player:
             return None
         labels = []
         points = []
+        if smith_ready and hp_low and self.smith_used_at is None:
+            self.smith_used_at = time
+            s_label, sx, _, sy = SMITH_SKILL
+            labels.append(s_label)
+            points.append((sx, sy))
         for index in ready:
             if index not in self.skills_used:
                 self.skills_used[index] = time
