@@ -26,6 +26,7 @@ class Action:
     charge: tuple[int, int, int, int] | None = None
     raw_point: bool = False
     keyevent: int | None = None
+    points: tuple[tuple[int, int], ...] | None = None
 
 
 @dataclass

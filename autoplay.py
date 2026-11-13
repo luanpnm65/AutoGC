@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from io import BytesIO
 from hashlib import sha256
 from pathlib import Path
+import struct
 import subprocess
 from time import monotonic, sleep
 import zlib
@@ -567,12 +568,23 @@ class Vision:
 
 
 class Player:
-    def __init__(self, mode, report, tower=None, auto_captcha=False, *, watch_ads=True, skip_waves=False):
+    def __init__(
+        self,
+        mode,
+        report,
+        tower=None,
+        auto_captcha=False,
+        *,
+        watch_ads=True,
+        skip_waves=False,
+        live=False,
+    ):
         if mode == "skip":
             mode = "wave"
             skip_waves = True
         self.mode = mode
         self.skip_waves = skip_waves
+        self.live = live
         self.report = report
         self.tower = tower
         self.auto_captcha = auto_captcha
@@ -753,11 +765,10 @@ class Player:
             self.report(time, "Unknown screen: waiting for the main screen or a battle")
             self.wait_notified = True
         if name == "battle":
-            if screen.mimic is not None and age >= 0.20:
+            if screen.mimic is not None and age >= 0.12:
                 if action := self.collect_mimic(time, screen.mimic):
-                    self.last_skill = time
                     return action
-            return self.cast(time, screen.ready) if age >= 0.45 else None
+            return self.cast(time, screen.ready) if age >= 0.12 else None
         if self.acted or age < 0.20:
             return None
         if name == "skip":
@@ -791,29 +802,60 @@ class Player:
         return action
 
     def cast(self, time, ready):
+        ready_set = set(ready)
         for index in tuple(self.skills_used):
-            self.skills_used[index] = 0 if index in ready else self.skills_used[index] + 1
-            if self.skills_used[index] >= 2:
+            if index not in ready_set:
                 del self.skills_used[index]
-        if time - self.last_skill < 0.30:
+            elif self.live and time - self.skills_used[index] >= 0.38:
+                del self.skills_used[index]
+        if time - self.last_skill < 0.05:
             return None
+        labels = []
+        points = []
         for index in ready:
             if index not in self.skills_used:
-                self.skills_used[index] = 0
-                self.last_skill = time
+                self.skills_used[index] = time
                 label, x, _, y = SKILLS[index]
-                return Action(f"cast {label}", (x, y))
-        return None
+                labels.append(label)
+                points.append((x, y))
+        if not points:
+            return None
+        self.last_skill = time
+        if len(points) == 1:
+            return Action(f"cast {labels[0]}", points[0])
+        return Action(
+            f"cast {', '.join(labels)}",
+            points[0],
+            points=tuple(points),
+        )
+
+
+def adb_screenshot(adb, serial):
+    """Capture an uncompressed Android frame (~3-4x faster than PNG screencap -p)."""
+    try:
+        raw = adb_run(adb, serial, "exec-out", "screencap")
+        if len(raw) >= 16:
+            width, height, fmt = struct.unpack_from("<III", raw, 0)
+            pixel_bytes = width * height * 4
+            header_bytes = len(raw) - pixel_bytes
+            if width >= 180 and height >= 180 and fmt in (1, 2, 5) and 12 <= header_bytes <= 32:
+                pixels = np.frombuffer(raw, dtype=np.uint8, offset=header_bytes, count=pixel_bytes)
+                rgba = pixels.reshape((height, width, 4))
+                rgb = rgba[:, :, 2::-1] if fmt == 5 else rgba[:, :, :3]
+                return Image.fromarray(np.ascontiguousarray(rgb), "RGB")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    raw_png = adb_run(adb, serial, "exec-out", "screencap", "-p")
+    with Image.open(BytesIO(raw_png)) as screen:
+        return screen.copy()
 
 
 def adb_frames(adb, serial, seconds):
     start = monotonic()
     while not seconds or monotonic() - start < seconds:
         sample = monotonic()
-        raw = adb_run(adb, serial, "exec-out", "screencap", "-p")
-        with Image.open(BytesIO(raw)) as screen:
-            yield sample - start, screen.copy()
-        sleep(max(0, 0.22 - (monotonic() - sample)))
+        yield sample - start, adb_screenshot(adb, serial)
+        sleep(max(0, 0.07 - (monotonic() - sample)))
 
 
 def replay_frames(video):
@@ -855,6 +897,7 @@ def play(args, target, report, journal):
         auto_captcha,
         watch_ads=args.ads,
         skip_waves=skip_waves,
+        live=bool(args.tap),
     )
     vision = Vision(upgrade_target is not None)
     prefix = "TAP" if args.tap else "PREVIEW"
@@ -879,6 +922,10 @@ def play(args, target, report, journal):
 
     captcha_attempts = 0
     last_captcha_attempt = float("-inf")
+    fg_checked_at = float("-inf")
+    fg_package = ""
+    fg_activity = ""
+    last_screen_name = "unknown"
     for time, original in frames:
         activity = None
         if args.video:
@@ -889,7 +936,20 @@ def play(args, target, report, journal):
                 time=time,
             )
         else:
-            package, win_activity = foreground_window(target.adb, target.serial)
+            now = monotonic()
+            can_reuse_fg = (
+                player.ad is None
+                and fg_package == "com.raongames.growcastle"
+                and bool(fg_activity)
+                and not is_ad_activity(fg_activity)
+                and last_screen_name in {"battle", "home", "gold", "replay_menu", "victory"}
+                and now - fg_checked_at < 0.85
+            )
+            if can_reuse_fg:
+                package, win_activity = fg_package, fg_activity
+            else:
+                package, win_activity = foreground_window(target.adb, target.serial)
+                fg_checked_at, fg_package, fg_activity = now, package, win_activity
             if package == "com.raongames.growcastle" and win_activity:
                 activity = win_activity
                 # An ad can show footage of a game. Its Android window owns the
@@ -903,11 +963,30 @@ def play(args, target, report, journal):
                     adb=target.adb,
                     serial=target.serial,
                 )
+                if can_reuse_fg and screen.name == "unknown":
+                    package, win_activity = foreground_window(target.adb, target.serial)
+                    fg_checked_at, fg_package, fg_activity = monotonic(), package, win_activity
+                    if package != "com.raongames.growcastle" or not win_activity:
+                        activity = None
+                        vision.ad_closer.reset()
+                        screen = Screen("unfocused")
+                    elif win_activity != activity:
+                        activity = win_activity
+                        screen = vision.classify(
+                            viewport(original),
+                            watching_ad=player.ad is not None,
+                            ad_foreground=is_ad_activity(activity),
+                            original=original,
+                            time=time,
+                            adb=target.adb,
+                            serial=target.serial,
+                        )
             elif player.ad is not None and package in AD_OVERLAY_PACKAGES:
                 screen = Screen("ad_external_overlay", keyevent=KEYCODE_BACK)
             else:
                 vision.ad_closer.reset()
                 screen = Screen("unfocused")
+        last_screen_name = screen.name
         was_paused = player.paused
         action = player.feed(time, screen)
         if not player.paused:
@@ -932,6 +1011,7 @@ def play(args, target, report, journal):
                     report(time + monotonic() - attempt_started, f"CAPTCHA attempt {captcha_attempts}/3 stopped: {exc}")
                     selected = False
                 last_captcha_attempt = monotonic()
+                fg_checked_at = float("-inf")
                 if selected:
                     report(time + monotonic() - attempt_started, "CAPTCHA: selection sent; waiting for the game to resume")
                 elif captcha_attempts >= 3:
@@ -942,11 +1022,12 @@ def play(args, target, report, journal):
                     adb_run(target.adb, target.serial, "shell", "input", "keyevent", str(action.keyevent))
                 report(time, f"{prefix} {action.name}")
             else:
+                tap_targets = action.points if action.points else (action.point,)
                 if args.tap:
                     if action.charge is not None:
                         expected_gems, expected_level, expected_cost, step_levels = action.charge
-                        raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
-                        with Image.open(BytesIO(raw)) as check:
+                        check = adb_screenshot(target.adb, target.serial)
+                        try:
                             latest = vision.classify(viewport(check))
                             observed_cost = latest.bulk_cost if step_levels == 10 else latest.cost
                             if (check.size != original.size or latest.name != "tower"
@@ -955,16 +1036,31 @@ def play(args, target, report, journal):
                                     or foreground_activity(target.adb, target.serial) != activity):
                                 tower.suspend()
                                 continue
+                        finally:
+                            check.close()
                         tower.record_tap(action)
-                    if action.raw_point:
-                        x, y = round(action.point[0]), round(action.point[1])
+                    scaled = []
+                    for pt in tap_targets:
+                        if action.raw_point:
+                            scaled.append((round(pt[0]), round(pt[1])))
+                        else:
+                            scaled.append((
+                                round(pt[0] * original.width / VIEWPORT[0]),
+                                round(pt[1] * original.height / VIEWPORT[1]),
+                            ))
+                    if len(scaled) == 1:
+                        x, y = scaled[0]
+                        adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
                     else:
-                        x = round(action.point[0] * original.width / VIEWPORT[0])
-                        y = round(action.point[1] * original.height / VIEWPORT[1])
-                    adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
+                        shell_cmd = "; ".join(
+                            f"input tap {x} {y}" if i == 0 else f"sleep 0.035; input tap {x} {y}"
+                            for i, (x, y) in enumerate(scaled)
+                        )
+                        adb_run(target.adb, target.serial, "shell", shell_cmd)
                 elif action.charge is not None:
                     tower.record_tap(action)
-                report(time, f"{prefix} {action.name} {action.point}")
+                pts_display = action.points if action.points and len(action.points) > 1 else action.point
+                report(time, f"{prefix} {action.name} {pts_display}")
 
 
 def _device_lock_key(target) -> str:
