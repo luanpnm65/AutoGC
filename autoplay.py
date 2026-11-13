@@ -122,13 +122,33 @@ AD_CLOSE_SCREENS = {
     "ad_external_overlay",
 }
 SKIP_CLOSE_POINT = (888, 216)
+SKIP_TIERS = (10, 20, 30)
+SKIP_10_POINT = (469, 365)
+SKIP_20_POINT = (639, 365)
 SKIP_30_POINT = (809, 365)
+SKIP_POINTS = {10: SKIP_10_POINT, 20: SKIP_20_POINT, 30: SKIP_30_POINT}
 SKIP_GEM_THRESHOLD = 30
-SKIP_30_MASK_SHAPE = (35, 72)
-SKIP_30_MASK_B85 = (
-    "c-muNfPwn|e;De2fEoW7fNboHKP><MgH$sg;0I!y40aI1hJl~K9>k~tGU`znHZTVJ0e<H9P+jcp="
-    "#2JeFyjG#KbXN_$Nz&FKcfQ3Xn-*oFc~0+)uh+3?`LlSTK@k4#9!DM^?w-f0RY<jPOk"
+SKIP_SLOTS = (
+    (418, 522, 434, SKIP_10_POINT),
+    (588, 692, 604, SKIP_20_POINT),
+    (758, 862, 774, SKIP_30_POINT),
 )
+SKIP_30_MASK_SHAPE = (35, 72)
+SKIP_MASKS_B85 = {
+    10: (
+        "c-n=}Jqmy@3<cl^88Y@lf)^87aOmijJXVL$_?HM`t8e<qBf|sk3_vUgCP1YL60m9lSP;PLC-"
+        "$#^_zzM8XUA;Fj>W4&4(=kofX8K23FnHa_1e{f*!FHV*q=;i"
+    ),
+    20: (
+        "c-n=~Jqmy@3<cmP9XjR+Uc*83S`I=B4jsKxkJX_VO@9Wl#W#JBA$b96G<%p(z_E#yqh_|ihJ"
+        "~#51?mGCL12C`1UgutJULf!yr4au2{S0j3hZ4xi}M*B$YCQ-lv)_Ra<3L*{zgAH{e4&4"
+    ),
+    30: (
+        "c-no>!3n@13<c1Dha9s|>0CV&4D{eyZqOAR!-Leupdx7dPmhEUK0u4j32an6AYLP3&MY#47="
+        "3{!HVrz#h7E{q!8xI?$kUbUxpN-~bSq$|h!f0+L%<za0XR;23zW~=YYm&=FE4>xSm6"
+    ),
+}
+SKIP_30_MASK_B85 = SKIP_MASKS_B85[30]
 # Background-masked 28x28 RGB + 1-bit mask of the open Mimic chest (mouth, fangs, tongue, lid).
 MIMIC_TEMPLATE_B85 = (
     "c-pO%Eo|FB6vtmwsU4V<0|z`Q+6o2+3IYraPMRlKnn8epfx&?T2Mi1h3<9j~fPsOf83Ysr1Ox;G1"
@@ -184,6 +204,7 @@ class Screen:
     bulk_cost: int | None = None
     mimic: tuple[int, int] | None = None
     skip_30: bool = False
+    skip_options: tuple[tuple[int, tuple[int, int]], ...] = ()
     smith_ready: bool = False
     hp_low: bool = False
     raw_point: bool = False
@@ -206,7 +227,8 @@ class Vision:
         self.boss_kernels = self._build_boss_kernels()
         self.mimic_templates = self._build_mimic_templates()
         self.gem_templates = load_gem_templates()
-        self.skip_30_mask = self._build_skip_30_mask()
+        self.skip_masks = self._build_skip_masks()
+        self.skip_30_mask = self.skip_masks[30]
         self.ad_closer = AdCloser(atlas_path)
         self.tower = None
         if upgrade_tower:
@@ -215,29 +237,61 @@ class Vision:
             self.tower = TowerVision()
 
     @staticmethod
-    def _build_skip_30_mask():
-        raw = zlib.decompress(base64.b85decode(SKIP_30_MASK_B85))
+    def _build_skip_masks():
         total = SKIP_30_MASK_SHAPE[0] * SKIP_30_MASK_SHAPE[1]
-        return np.unpackbits(np.frombuffer(raw, dtype=np.uint8))[:total].reshape(SKIP_30_MASK_SHAPE).astype(bool)
+        masks = {}
+        for tier, b85 in SKIP_MASKS_B85.items():
+            raw = zlib.decompress(base64.b85decode(b85))
+            masks[tier] = (
+                np.unpackbits(np.frombuffer(raw, dtype=np.uint8))[:total]
+                .reshape(SKIP_30_MASK_SHAPE)
+                .astype(bool)
+            )
+        return masks
+
+    @classmethod
+    def _build_skip_30_mask(cls):
+        return cls._build_skip_masks()[30]
 
     def white_gems(self, rgb):
         return read_white_gems(rgb, self.gem_templates)
 
+    def detect_skip_options(self, rgb) -> tuple[tuple[int, tuple[int, int]], ...]:
+        height, width = SKIP_30_MASK_SHAPE
+        found: dict[int, tuple[int, int]] = {}
+        for bx1, bx2, gx, center in SKIP_SLOTS:
+            button = rgb[316:415, bx1:bx2]
+            red, green, blue = button[:, :, 0], button[:, :, 1], button[:, :, 2]
+            gold = (red > 180) & (green > 115) & (blue < 75) & (red.astype(np.int16) - blue.astype(np.int16) > 120)
+            if gold.mean() < 0.42:
+                continue
+            cost_area = rgb[426:460, bx1:bx2]
+            cr, cg, cb = cost_area[:, :, 0], cost_area[:, :, 1], cost_area[:, :, 2]
+            cyan = (cb > 170) & (cg > 130) & (cb.astype(np.int16) - cr.astype(np.int16) > 60)
+            if cyan.mean() < 0.04:
+                continue
+            best_tier = None
+            best_score = 0.0
+            for tier, mask in self.skip_masks.items():
+                lead_mask = mask[:, :36]
+                for dy in range(-3, 4):
+                    for dx in range(-3, 4):
+                        sub = rgb[335 + dy:335 + dy + height, gx + dx:gx + dx + width]
+                        observed = (sub.min(axis=2) > 175) & (np.ptp(sub, axis=2) < 42)
+                        denom_all = np.count_nonzero(observed | mask)
+                        denom_lead = np.count_nonzero(observed[:, :36] | lead_mask)
+                        if denom_all > 0 and denom_lead > 0:
+                            iou_all = np.count_nonzero(observed & mask) / denom_all
+                            iou_lead = np.count_nonzero(observed[:, :36] & lead_mask) / denom_lead
+                            if iou_all >= 0.72 and iou_lead >= 0.65 and iou_all > best_score:
+                                best_score = iou_all
+                                best_tier = tier
+            if best_tier is not None and best_tier not in found:
+                found[best_tier] = center
+        return tuple(sorted(found.items()))
+
     def matches_skip_30(self, rgb):
-        button = rgb[316:415, 758:862]
-        red, green, blue = button[:, :, 0], button[:, :, 1], button[:, :, 2]
-        gold = (red > 180) & (green > 115) & (blue < 75) & (red - blue > 120)
-        if gold.mean() < 0.42:
-            return False
-        height, width = self.skip_30_mask.shape
-        for dy in range(-3, 4):
-            for dx in range(-3, 4):
-                sub = rgb[335 + dy:335 + dy + height, 774 + dx:774 + dx + width]
-                observed = (sub.min(axis=2) > 175) & (np.ptp(sub, axis=2) < 42)
-                denom = np.count_nonzero(observed | self.skip_30_mask)
-                if denom > 0 and np.count_nonzero(observed & self.skip_30_mask) / denom >= 0.65:
-                    return True
-        return False
+        return any(tier == 30 for tier, _ in self.detect_skip_options(rgb))
 
     @staticmethod
     def _build_boss_kernels():
@@ -520,11 +574,13 @@ class Vision:
         if (hud or dim) and self.hp_empty(rgb, dim):
             return Screen("defeat")
         if hud and self.matches(rgb, "skip_title") and self.matches(rgb, "skip_close"):
+            options = self.detect_skip_options(rgb)
             return Screen(
                 "skip",
                 SKIP_CLOSE_POINT,
                 gems=self.white_gems(rgb),
-                skip_30=self.matches_skip_30(rgb),
+                skip_30=any(tier == 30 for tier, _ in options),
+                skip_options=options,
             )
         if hud and self.matches(rgb, "upgrade"):
             if self.matches(rgb, "replay_100") and self.matches(rgb, "replay_80"):
@@ -610,11 +666,21 @@ class Player:
         humanize=False,
         rng=None,
     ):
-        if mode == "skip":
+        if mode in {"skip", "skip10", "skip20", "skip30"}:
+            mode_tier = SKIP_GEM_THRESHOLD if mode == "skip" else int(mode[4:])
             mode = "wave"
-            skip_waves = True
+            if not skip_waves or skip_waves is True:
+                skip_waves = mode_tier
+        if skip_waves is True:
+            skip_tier = SKIP_GEM_THRESHOLD
+        elif skip_waves in (False, None, 0):
+            skip_tier = 0
+        elif type(skip_waves) is int and skip_waves in SKIP_TIERS:
+            skip_tier = skip_waves
+        else:
+            raise ValueError(f"Unsupported Wave Skip tier: {skip_waves!r} (choose 10, 20, or 30)")
         self.mode = mode
-        self.skip_waves = skip_waves
+        self.skip_waves = skip_tier
         self.humanize = humanize
         self.rng = rng if rng is not None else random.SystemRandom()
         self.report = report
@@ -859,8 +925,12 @@ class Player:
             if self.skip_waves and self.mode == "wave":
                 if screen.gems is None and age < 0.65:
                     return None
-                if screen.gems is not None and screen.gems >= SKIP_GEM_THRESHOLD and screen.skip_30:
-                    action = Action("select Wave Skip 30", SKIP_30_POINT)
+                options = dict(screen.skip_options)
+                if 30 not in options and screen.skip_30:
+                    options[30] = SKIP_30_POINT
+                target_point = options.get(self.skip_waves)
+                if screen.gems is not None and screen.gems >= self.skip_waves and target_point is not None:
+                    action = Action(f"select Wave Skip {self.skip_waves}", target_point)
                 else:
                     action = Action("close Wave Skip", screen.point)
             else:
@@ -938,7 +1008,9 @@ def action_jitter(action: Action) -> tuple[float, float]:
     label = action.name
     if label in {"start next Battle", "open Replay menu"}:
         return (15.0, 11.0)
-    if label in {"start Replay 100%", "select Wave Skip 30", "open gold ad (GET)"}:
+    if label.startswith("select Wave Skip "):
+        return (15.0, 12.0)
+    if label in {"start Replay 100%", "open gold ad (GET)"}:
         return (13.0, 6.5)
     if label == "restore hero slots":
         return (16.0, 9.0)
@@ -968,9 +1040,22 @@ def replay_frames(video):
             next_sample += 0.20
 
 
+def _resolve_skip_tier(mode: str, skip_arg: int | bool | None) -> int:
+    if skip_arg is True:
+        return SKIP_GEM_THRESHOLD
+    if type(skip_arg) is int and skip_arg in SKIP_TIERS:
+        return skip_arg
+    if mode == "skip":
+        return SKIP_GEM_THRESHOLD
+    if mode in {"skip10", "skip20", "skip30"}:
+        return int(mode[4:])
+    return 0
+
+
 def play(args, target, report, journal):
-    skip_waves = args.skip or args.mode == "skip"
-    mode_label = "skip" if (args.mode == "skip" or (args.mode == "wave" and args.skip)) else args.mode
+    skip_tier = _resolve_skip_tier(args.mode, args.skip)
+    is_wave_mode = args.mode in {"wave", "skip", "skip10", "skip20", "skip30"}
+    mode_label = (f"skip{skip_tier}" if skip_tier != SKIP_GEM_THRESHOLD else "skip") if (is_wave_mode and skip_tier) else args.mode
     use_humanize = bool(args.tap and getattr(args, "humanize", True))
     if args.upgrade_hero is not None:
         upgrade_target = "hero"
@@ -1000,7 +1085,7 @@ def play(args, target, report, journal):
         tower,
         auto_captcha,
         watch_ads=args.ads,
-        skip_waves=skip_waves,
+        skip_waves=skip_tier,
         humanize=use_humanize,
     )
     vision = Vision(True)
@@ -1138,9 +1223,10 @@ def _device_lock_key(target) -> str:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path, help="preview decisions on a recorded MP4")
-    parser.add_argument("--mode", choices=("wave", "replay", "skip"), default="wave")
-    parser.add_argument("--skip", action="store_true",
-                        help="select 30 WAVES on Wave Skip when white gems >= 30")
+    parser.add_argument("--mode", choices=("wave", "replay", "skip", "skip10", "skip20", "skip30"), default="wave")
+    parser.add_argument("--skip", nargs="?", const=SKIP_GEM_THRESHOLD, type=int, choices=SKIP_TIERS,
+                        metavar="{10,20,30}",
+                        help="select 10, 20, or 30 WAVES on Wave Skip when white gems >= tier (default: 30)")
     parser.add_argument("--emulator", choices=("bluestacks", "ldplayer"),
                         help="target emulator (default: bluestacks, or ldplayer when --ldconsole is given)")
     parser.add_argument("--instance", help="BlueStacks 5 instance key or window title (e.g. Pie64, Pie64_1)")

@@ -56,8 +56,10 @@ Nếu trên máy chỉ đang mở đúng một cửa sổ BlueStacks 5, tool t�
 # Bấm thật, bắt đầu bằng Replay 100%
 .\.venv\Scripts\python.exe autoplay.py --mode replay --tap
 
-# Bấm thật, bật chế độ Skip 30 WAVES khi kim cương trắng >= 30
-.\.venv\Scripts\python.exe autoplay.py --mode skip --tap
+# Bấm thật, bật chế độ Skip WAVES (chọn 10, 20 hoặc mặc định 30 khi đủ kim cương trắng tương ứng)
+.\.venv\Scripts\python.exe autoplay.py --skip --tap
+.\.venv\Scripts\python.exe autoplay.py --skip 20 --tap
+.\.venv\Scripts\python.exe autoplay.py --skip 10 --tap
 ```
 
 ### Khi chạy nhiều cửa sổ cùng lúc (Multi-Instance)
@@ -88,7 +90,7 @@ Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riên
 | Màn chính | Tool nhận diện các nút từ ảnh mẫu và bấm **Battle** hoặc **Replay** theo chế độ đang chạy. Trong menu Replay, tool chọn ô **100%**. |
 | Đang đánh | Nhận diện cả thanh tiến trình **WAVE** lẫn thanh máu **BOSS** (dù đầy máu hay cạn máu), theo dõi thanh hồi kỹ năng của **2 đơn vị bên trái tháp** (ưu tiên bấm trước) cùng **9 ô Hero** trên tháp. Khi thanh xanh đầy, tool bấm một lần và chờ thanh rời trạng thái đầy trước khi bấm lại ở lần hồi tiếp theo. |
 | Rương **Mimic** | Ở mọi chế độ auto (`wave`, `replay`, màn thường, màn Boss hay màn chính), khi thấy rương **Mimic** mở miệng có bàn tay chỉ vào trên sân, tool ưu tiên bấm trực tiếp vào rương để nhận thưởng ngay. |
-| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--mode skip` (hoặc `--skip`), nếu số **kim cương trắng** trên thanh đầu màn hình từ **30 trở lên** (bỏ qua phần cộng thêm màu cam như `+500`), tool chọn **30 WAVES** thay vì đóng hộp; nếu dưới 30 thì bấm **X** như bình thường. |
+| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--skip [10\|20\|30]` (mặc định `30` nếu không truyền số, hoặc `--mode skip` / `skip10` / `skip20` / `skip30`), nếu số **kim cương trắng** trên thanh đầu màn hình đạt từ mốc đã chọn trở lên (`>= 10`, `20` hoặc `30`, bỏ qua phần cộng thêm màu cam như `+500`), tool chọn đúng nút **10 / 20 / 30 WAVES**; nếu chưa đủ thì bấm **X** như bình thường. |
 | **Victory** | Tool chờ về màn chính, ưu tiên hộp thưởng vàng nếu đã bật tự xem quảng cáo, rồi tiếp tục theo chế độ hiện tại. |
 | HP lâu đài về **0** | Tool nhận diện số 0 cùng thanh HP cạn, chuyển từ wave sang Replay và giữ Replay đến khi kết thúc phiên chạy. |
 | **CAPTCHA** | Tool tạm dừng đánh. Nếu bật `--auto-captcha`, tool thử chọn một lần. Khi cần giải tay, auto play chờ bạn xử lý rồi tiếp tục. |
@@ -190,4 +192,42 @@ Nếu vẫn muốn chạy trên LDPlayer 9, thêm `--emulator ldplayer` hoặc t
 .\.venv\Scripts\python.exe autoplay.py --emulator ldplayer --index 0 --tap
 .\.venv\Scripts\python.exe autoplay.py --ldconsole "D:\LDPlayer\LDPlayer9\ldconsole.exe" --index 0 --tap
 .\.venv\Scripts\python.exe ldplayer_captcha.py --index 0 --tap
+```
+
+## 6. Tổng hợp nhanh các cờ dòng lệnh (`autoplay.py`)
+
+| Nhóm | Cờ | Mặc định | Tác dụng ngắn gọn |
+| --- | --- | --- | --- |
+| **Chế độ chạy** | `--tap` | Tắt (`PREVIEW`) | Gửi thao tác bấm thật vào giả lập. |
+| | `--mode {wave,replay,skip,skip10,skip20,skip30}` | `wave` | Chọn chế độ: đi `wave` mới, đánh lại `replay` 100%, hoặc đi wave kèm `skip` (`30` / `10` / `20`). |
+| | `--skip [{10,20,30}]` | Tắt (`30` nếu bật không số) | Chọn mốc **10**, **20** hoặc **30 WAVES** ở hộp Wave Skip khi kim cương trắng `>=` mốc đã chọn. |
+| | `--seconds N` | `0` (vô hạn) | Giới hạn thời gian chạy `N` giây rồi tự dừng. |
+| | `--video FILE` | — | Chạy thử/xem trước quyết định trên file video `.mp4`. |
+| **Tự động & chống bot** | `--ads` / `--no-ads` | `--ads` | Bật / tắt tự mở và đóng quảng cáo thưởng vàng **GET**. |
+| | `--auto-captcha` / `--no-auto-captcha` | `--auto-captcha` | Bật / tắt tự giải CAPTCHA cốc kim cương khi chạy `--tap`. |
+| | `--humanize` / `--no-humanize` | `--humanize` | Bật / tắt giả lập ngón tay người thật, xáo trộn nhịp bấm & nghỉ ngắn chống phát hiện bot. |
+| **Nâng cấp kim cương** | `--upgrade-hero [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Hero ô góc trên phải `(461, 92)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| | `--upgrade-tower [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Tháp tầng 2 lâu đài `(380, 366)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| | `--upgrade-gems GEMS` | — | Ghi đè mốc kim cương trắng kích hoạt cho `--upgrade-hero` / `--upgrade-tower`. |
+| | `--upgrade-levels LEVELS` | `max(50, GEMS)` | Số cấp nâng tối đa trong mỗi đợt nâng cấp. |
+| **Chọn giả lập** | `--list` | — | Liệt kê danh sách các instance giả lập nhận diện được rồi thoát. |
+| | `--instance TÊN` | Tự chọn nếu 1 cửa sổ | Chọn cửa sổ BlueStacks 5 theo mã (`Pie64`, `Pie64_1`) hoặc tên tiêu đề cửa sổ. |
+| | `--index N` | — | Chọn instance giả lập theo số thứ tự (`0`, `1`, `2`, ...). |
+| | `--serial SERIAL` | Tự dò | Chỉ định trực tiếp địa chỉ ADB (`127.0.0.1:5555`, `emulator-5554`, ...). |
+| | `--emulator {bluestacks,ldplayer}` | `bluestacks` | Chọn loại giả lập mục tiêu. |
+| | `--adb PATH` | Tự dò | Đường dẫn tới `HD-Adb.exe` hoặc `adb.exe`. |
+| | `--conf PATH` | Tự dò | Đường dẫn tới `bluestacks.conf`. |
+| | `--ldconsole PATH` | — | Đường dẫn tới `ldconsole.exe` (dành cho LDPlayer 9). |
+
+**Ví dụ kết hợp thường dùng:**
+
+```powershell
+# Đi wave + Skip 20 + không xem quảng cáo + tự nâng Hero khi đủ 60 kim cương trắng
+.\.venv\Scripts\python.exe autoplay.py --tap --skip 20 --no-ads --upgrade-hero 60
+
+# Đi wave + Skip 30 (mặc định khi dùng --skip không kèm số) + xem quảng cáo
+.\.venv\Scripts\python.exe autoplay.py --tap --skip
+
+# Treo Replay trên cửa sổ Pie64_1 + xem quảng cáo + tự nâng Tháp khi đủ 50 kim cương trắng
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-tower 50
 ```
