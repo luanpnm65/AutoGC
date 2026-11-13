@@ -94,6 +94,7 @@ BOSS_GLYPH = (
     "@@.........@@@@@......@@@@.........@@@.........@@",
     "..@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
 )
+SMITH_SKILL = ("Smith (HP < 50%)", 373, 51, 92)
 ARCHER_SKILLS = (
     ("archer skill 1", 135, 363, 405),
     ("archer skill 2", 135, 480, 522),
@@ -181,6 +182,8 @@ class Screen:
     bulk_cost: int | None = None
     mimic: tuple[int, int] | None = None
     skip_30: bool = False
+    smith_ready: bool = False
+    hp_low: bool = False
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -393,6 +396,26 @@ class Vision:
         health = (red > (65 if dim else 130)) & (red - blue > (35 if dim else 80))
         return health.sum() < 6 and pale_pixels(bar, threshold).sum() < 8
 
+    @staticmethod
+    def castle_hp_low(rgb):
+        """Return True when un-dimmed Castle HP bar (x=615..937, 50% at x=776) is below 50%."""
+        if (rgb[8:28, 616:645].min(axis=2) > 175).mean() < 0.16:
+            return False
+        mid_bar = rgb[10:25, 776:788]
+        red, _, blue = mid_bar.transpose(2, 0, 1)
+        return float(((red > 140) & (red - blue > 70)).mean()) < 0.15
+
+    @staticmethod
+    def smith_skill_ready(rgb):
+        """Check cyan skill bar for top-row middle Hero (Smith at x=373, y_bar≈51)."""
+        _, x, _, _ = SMITH_SKILL
+        sr, sg, sb = rgb[44:59, x - 24:x + 25].transpose(2, 0, 1)
+        cyan = (sb > 164) & (sg > 105) & (sb - sr > 65) & (sg - sr > 50)
+        return any(
+            float(cyan[dy:dy + 4].mean()) >= 0.90
+            for dy in range(cyan.shape[0] - 3)
+        )
+
     def reward_close(self, image):
         # Search only the player chrome for the full label and the adjoining X.
         left, top = 902, 8
@@ -519,7 +542,13 @@ class Vision:
                 cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
                 if cyan.mean() >= 0.92:
                     ready.append(index)
-            return Screen("battle", ready=tuple(ready), mimic=self.find_mimic(rgb))
+            return Screen(
+                "battle",
+                ready=tuple(ready),
+                mimic=self.find_mimic(rgb),
+                smith_ready=self.smith_skill_ready(rgb),
+                hp_low=self.castle_hp_low(rgb),
+            )
         return Screen("unknown")
 
     def classify(
@@ -757,7 +786,14 @@ class Player:
                 if action := self.collect_mimic(time, screen.mimic):
                     self.last_skill = time
                     return action
-            return self.cast(time, screen.ready) if age >= 0.45 else None
+            if age < 0.45:
+                return None
+            return self.cast(
+                time,
+                screen.ready,
+                smith_ready=screen.smith_ready,
+                hp_low=screen.hp_low,
+            )
         if self.acted or age < 0.20:
             return None
         if name == "skip":
@@ -790,13 +826,24 @@ class Player:
         self.acted = True
         return action
 
-    def cast(self, time, ready):
+    def cast(self, time, ready, *, smith_ready=False, hp_low=False):
+        if "smith" in self.skills_used:
+            self.skills_used["smith"] = 0 if smith_ready else self.skills_used["smith"] + 1
+            if self.skills_used["smith"] >= 2:
+                del self.skills_used["smith"]
         for index in tuple(self.skills_used):
+            if index == "smith":
+                continue
             self.skills_used[index] = 0 if index in ready else self.skills_used[index] + 1
             if self.skills_used[index] >= 2:
                 del self.skills_used[index]
         if time - self.last_skill < 0.30:
             return None
+        if smith_ready and hp_low and "smith" not in self.skills_used:
+            self.skills_used["smith"] = 0
+            self.last_skill = time
+            label, x, _, y = SMITH_SKILL
+            return Action(f"cast {label}", (x, y))
         for index in ready:
             if index not in self.skills_used:
                 self.skills_used[index] = 0
