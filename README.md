@@ -191,3 +191,38 @@ Nếu vẫn muốn chạy trên LDPlayer 9, thêm `--emulator ldplayer` hoặc t
 .\.venv\Scripts\python.exe autoplay.py --ldconsole "D:\LDPlayer\LDPlayer9\ldconsole.exe" --index 0 --tap
 .\.venv\Scripts\python.exe ldplayer_captcha.py --index 0 --tap
 ```
+
+## 6. Tổng hợp nhanh các cờ dòng lệnh (`autoplay.py`)
+
+| Nhóm | Cờ | Mặc định | Tác dụng ngắn gọn |
+| --- | --- | --- | --- |
+| **Chế độ chạy** | `--tap` | Tắt (`PREVIEW`) | Gửi thao tác bấm thật vào giả lập. |
+| | `--mode {wave,replay,skip}` | `wave` | Chọn chế độ: đi `wave` mới, đánh lại `replay` 100%, hoặc đi wave kèm `skip` 30. |
+| | `--skip` | Tắt | Chọn **30 WAVES** ở hộp Wave Skip khi kim cương trắng `>= 30` (như `--mode skip`). |
+| | `--seconds N` | `0` (vô hạn) | Giới hạn thời gian chạy `N` giây rồi tự dừng. |
+| | `--video FILE` | — | Chạy thử/xem trước quyết định trên file video `.mp4`. |
+| **Tự động & chống bot** | `--ads` / `--no-ads` | `--ads` | Bật / tắt tự mở và đóng quảng cáo thưởng vàng **GET**. |
+| | `--auto-captcha` / `--no-auto-captcha` | `--auto-captcha` | Bật / tắt tự giải CAPTCHA cốc kim cương khi chạy `--tap`. |
+| | `--humanize` / `--no-humanize` | `--humanize` | Bật / tắt giả lập ngón tay người thật, xáo trộn nhịp bấm & nghỉ ngắn chống phát hiện bot. |
+| **Nâng cấp kim cương** | `--upgrade-hero [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Hero ô góc trên phải `(461, 92)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| | `--upgrade-tower [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Tháp tầng 2 lâu đài `(380, 366)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| | `--upgrade-gems GEMS` | — | Ghi đè mốc kim cương trắng kích hoạt cho `--upgrade-hero` / `--upgrade-tower`. |
+| | `--upgrade-levels LEVELS` | `max(50, GEMS)` | Số cấp nâng tối đa trong mỗi đợt nâng cấp. |
+| **Chọn giả lập** | `--list` | — | Liệt kê danh sách các instance giả lập nhận diện được rồi thoát. |
+| | `--instance TÊN` | Tự chọn nếu 1 cửa sổ | Chọn cửa sổ BlueStacks 5 theo mã (`Pie64`, `Pie64_1`) hoặc tên tiêu đề cửa sổ. |
+| | `--index N` | — | Chọn instance giả lập theo số thứ tự (`0`, `1`, `2`, ...). |
+| | `--serial SERIAL` | Tự dò | Chỉ định trực tiếp địa chỉ ADB (`127.0.0.1:5555`, `emulator-5554`, ...). |
+| | `--emulator {bluestacks,ldplayer}` | `bluestacks` | Chọn loại giả lập mục tiêu. |
+| | `--adb PATH` | Tự dò | Đường dẫn tới `HD-Adb.exe` hoặc `adb.exe`. |
+| | `--conf PATH` | Tự dò | Đường dẫn tới `bluestacks.conf`. |
+| | `--ldconsole PATH` | — | Đường dẫn tới `ldconsole.exe` (dành cho LDPlayer 9). |
+
+**Ví dụ kết hợp thường dùng:**
+
+```powershell
+# Đi wave + Skip 30 + không xem quảng cáo + tự nâng Hero khi đủ 60 kim cương trắng
+.\.venv\Scripts\python.exe autoplay.py --tap --skip --no-ads --upgrade-hero 60
+
+# Treo Replay trên cửa sổ Pie64_1 + xem quảng cáo + tự nâng Tháp khi đủ 50 kim cương trắng
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-tower 50
+```
