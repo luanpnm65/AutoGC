@@ -170,84 +170,105 @@ class Result:
         return None
 
 
+def _step_rotation(a1, a2):
+    """Physical cup rotation modulo 180-degree upside-down cylinder symmetry."""
+    return min(
+        angle_distance(a2, a1),
+        angle_distance((a2 + 180) % 360, a1),
+    )
+
+
 def _select_by_unique_spin_chain(observations, end_time):
     """Eliminate twin-angle decoy groups by tracing all 8 settled slots backward.
 
     Grow Castle partitions empty decoy cups into groups of >= 2 cups that share
     identical rotation curves angle(t), while the diamond cup follows a unique,
-    faster rotation curve right up to settling.
+    faster rotation curve right up to settling. Joint 1-to-1 pose assignment and
+    180-degree cylinder-symmetry unwrapping prevent crossed tracks and flip noise.
     """
     start_time = observations[0].time
-    chains = {slot: {} for slot in range(len(SLOTS))}
-    for slot in range(len(SLOTS)):
-        pos = SLOTS[slot].astype(np.float64)
-        vel = np.zeros(2, dtype=np.float64)
-        last_seen = observations[-1].time
-        for idx in range(len(observations) - 1, -1, -1):
-            obs = observations[idx]
-            dt = last_seen - obs.time
-            if dt > 0.20:
-                break
-            if not obs.poses:
-                continue
-            predicted = pos - 0.55 * vel * dt
-            candidate = min(obs.poses, key=lambda p: p.distance(predicted))
-            if candidate.distance(predicted) <= 13 and candidate.distance(pos) <= 15:
-                if dt > 1e-3:
-                    vel = 0.55 * vel + 0.45 * ((pos - np.array(candidate.position)) / dt)
-                pos = np.array(candidate.position, dtype=np.float64)
-                last_seen = obs.time
-                chains[slot][idx] = candidate
+    n_slots = len(SLOTS)
+    chains = {slot: {} for slot in range(n_slots)}
+    pos = {slot: SLOTS[slot].astype(np.float64) for slot in range(n_slots)}
+    vel = {slot: np.zeros(2, dtype=np.float64) for slot in range(n_slots)}
+    last_seen = {slot: observations[-1].time for slot in range(n_slots)}
 
-    late_time = start_time + 0.32 * (end_time - start_time)
+    for idx in range(len(observations) - 1, -1, -1):
+        obs = observations[idx]
+        if not obs.poses:
+            continue
+        pairs = []
+        for slot in range(n_slots):
+            dt = last_seen[slot] - obs.time
+            if dt > 0.22:
+                continue
+            pred = pos[slot] - 0.55 * vel[slot] * dt
+            for pi, pose in enumerate(obs.poses):
+                d_pred = pose.distance(pred)
+                if d_pred <= 14 and pose.distance(pos[slot]) <= 16:
+                    pairs.append((d_pred, slot, pi))
+        pairs.sort(key=lambda item: item[0])
+        used_slots = set()
+        used_poses = set()
+        for _, slot, pi in pairs:
+            if slot in used_slots or pi in used_poses:
+                continue
+            used_slots.add(slot)
+            used_poses.add(pi)
+            pose = obs.poses[pi]
+            dt = last_seen[slot] - obs.time
+            if dt > 1e-3:
+                vel[slot] = 0.55 * vel[slot] + 0.45 * ((pos[slot] - np.array(pose.position)) / dt)
+            pos[slot] = np.array(pose.position, dtype=np.float64)
+            last_seen[slot] = obs.time
+            chains[slot][idx] = pose
+
+    late_time = start_time + 0.30 * (end_time - start_time)
     late_indices = [i for i, obs in enumerate(observations) if obs.time >= late_time]
     spin_frames = {}
     late_rotation = {}
-    for slot in range(len(SLOTS)):
+    for slot in range(n_slots):
         spinning = [
             i for i in late_indices
-            if i in chains[slot] and chains[slot][i].score >= 0.72
-            and angle_distance(chains[slot][i].angle, 0) >= 30
+            if i in chains[slot] and chains[slot][i].score >= 0.70
+            and _step_rotation(0, chains[slot][i].angle) >= 25
         ]
         spin_frames[slot] = spinning
         angles = [chains[slot][i].angle for i in late_indices if i in chains[slot]]
-        late_rotation[slot] = sum(angle_distance(a2, a1) for a1, a2 in zip(angles, angles[1:]))
+        late_rotation[slot] = sum(_step_rotation(a1, a2) for a1, a2 in zip(angles, angles[1:]))
 
     twin_ratio = {}
-    for slot in range(len(SLOTS)):
+    for slot in range(n_slots):
         spinning = spin_frames[slot]
         best_match = 0.0
         if spinning:
-            min_overlap = max(2, int(0.4 * len(spinning)))
-            for other in range(len(SLOTS)):
+            min_overlap = max(3, int(0.55 * len(spinning)))
+            for other in range(n_slots):
                 if other == slot:
                     continue
                 overlap = [i for i in spinning if i in chains[other]]
                 if len(overlap) >= min_overlap:
                     same = sum(
                         1 for i in overlap
-                        if angle_distance(chains[slot][i].angle, chains[other][i].angle) <= 15
+                        if _step_rotation(chains[slot][i].angle, chains[other][i].angle) <= 15
                     )
                     best_match = max(best_match, same / len(overlap))
         twin_ratio[slot] = best_match
 
     high_fps = len(observations) >= 45
     min_spin = 6 if high_fps else 3
-    min_rot = 220 if high_fps else 150
+    min_rot = 260 if high_fps else 220
     max_board_rot = max(late_rotation.values(), default=0)
     solos = [
-        slot for slot in range(len(SLOTS))
-        if twin_ratio[slot] <= 0.55
+        slot for slot in range(n_slots)
+        if twin_ratio[slot] <= 0.58
         and len(spin_frames[slot]) >= min_spin
         and late_rotation[slot] >= min_rot
     ]
     solos.sort(key=lambda s: (late_rotation[s], len(spin_frames[s])), reverse=True)
     if solos and late_rotation[solos[0]] >= max_board_rot:
         best = solos[0]
-        if len(solos) == 1 or (
-            late_rotation[best] >= 1.25 * late_rotation[solos[1]]
-            and len(spin_frames[best]) >= 1.4 * len(spin_frames[solos[1]])
-        ):
+        if len(solos) == 1 or late_rotation[best] >= 1.4 * late_rotation[solos[1]]:
             return best, len(spin_frames[best])
     return None, 0
 
