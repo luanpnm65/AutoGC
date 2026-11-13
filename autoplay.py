@@ -26,7 +26,15 @@ from emulator import (
     is_ad_activity,
     resolve_target,
 )
-from tower_upgrade import Action, GEM_THRESHOLD, TowerUpgrade, lock_journal
+from tower_upgrade import (
+    Action,
+    DETAIL_CLOSE,
+    EXIT_LAYER_VIEW,
+    GEM_THRESHOLD,
+    LIST_CLOSE,
+    TowerUpgrade,
+    lock_journal,
+)
 from tower_vision import load_gem_templates, read_white_gems
 from windows_video import read_video
 
@@ -731,11 +739,14 @@ class Player:
             try:
                 handled, action = self.tower.feed(time, screen)
             except RuntimeError as exc:
-                self.report(time, f"{exc} Automatic upgrades disabled for this run.")
-                self.tower = None
-            else:
-                if handled:
-                    return action
+                try:
+                    handled, action = self.tower._abort_to_home(time, name, screen.layout, str(exc))
+                except RuntimeError:
+                    self.report(time, f"{exc} Exiting upgrade menu to resume play.")
+                    self.tower = None
+                    handled, action = False, None
+            if handled:
+                return action
         elif self.tower is not None:
             self.tower.suspend()
         if name == "unknown" and age >= 3 and not self.wait_notified:
@@ -759,14 +770,21 @@ class Player:
                     action = Action("close Wave Skip", screen.point)
             else:
                 action = Action("close Wave Skip", screen.point)
+        elif name == "tower" and age >= 0.35:
+            action = Action("close detail panel", DETAIL_CLOSE)
+        elif name == "castles" and age >= 0.35:
+            action = Action("close side menu", LIST_CLOSE)
         elif name == "replay_menu" and self.mode == "replay":
             action = Action("start Replay 100%", screen.point)
         elif name in {"home", "gold"} and age >= 0.85:
-            self.skills_used.clear()
-            if self.mode == "wave":
-                action = Action("start next Battle", (1191, 648))
+            if screen.layout == "castle" and self.tower is None:
+                action = Action("restore hero slots", EXIT_LAYER_VIEW)
             else:
-                action = Action("open Replay menu", (1017, 648))
+                self.skills_used.clear()
+                if self.mode == "wave":
+                    action = Action("start next Battle", (1191, 648))
+                else:
+                    action = Action("open Replay menu", (1017, 648))
         else:
             return None
         self.acted = True
