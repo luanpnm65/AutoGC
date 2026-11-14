@@ -742,6 +742,7 @@ class Player:
         self.after_victory = False
         self.wave_hero_wait_pending = False
         self.skills_used = {}
+        self.next_hero_skill = 0
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
         self.mimic_taps = 0
@@ -897,6 +898,7 @@ class Player:
             self.report(time, "Castle HP reached zero: switched to Replay")
         if name == "victory":
             self.skills_used.clear()
+            self.next_hero_skill = 0
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
@@ -1010,6 +1012,7 @@ class Player:
                 if age < self.home_delay:
                     return None
                 self.skills_used.clear()
+                self.next_hero_skill = 0
                 if self.mode == "wave":
                     action = Action("start next Battle", (1191, 648))
                 else:
@@ -1037,9 +1040,21 @@ class Player:
             self.last_skill = time
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
-        for index in ready:
-            if index not in self.skills_used:
+        # Smith and both Archers take priority but must not reset the Hero cursor.
+        for index in range(len(ARCHER_SKILLS)):
+            if index in ready and index not in self.skills_used:
                 self.skills_used[index] = 0
+                self.last_skill = time
+                label, x, _, y = SKILLS[index]
+                return Action(f"cast {label}", (x, y))
+        # Continue from the Hero after the last one cast, skipping unavailable
+        # skills and wrapping to Hero 1 only after reaching Hero 9.
+        for offset in range(len(HERO_SKILLS)):
+            hero = (self.next_hero_skill + offset) % len(HERO_SKILLS)
+            index = len(ARCHER_SKILLS) + hero
+            if index in ready and index not in self.skills_used:
+                self.skills_used[index] = 0
+                self.next_hero_skill = (hero + 1) % len(HERO_SKILLS)
                 self.last_skill = time
                 label, x, _, y = SKILLS[index]
                 return Action(f"cast {label}", (x, y))

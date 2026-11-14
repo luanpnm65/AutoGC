@@ -178,7 +178,8 @@ Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc 
 
 - **Tự cast Smith khi máu lâu đài `< 50%`**: Tool theo dõi thanh hồi chiêu của ô Hero **hàng trên cùng ở giữa** `(373, 92)` và mức máu tại mốc `50%` của thanh **Castle HP**. Khi máu `>= 50%` tool giữ nguyên không bấm phí; ngay khi máu tụt `< 50%` sẽ ưu tiên bấm Smith trước tiên.
 - **Mặc định bật `--humanize` khi chạy `--tap`** (có thể tắt bằng `--no-humanize`):
-  - **Giữ nguyên thứ tự và nhịp cast skill như bản gốc**: bấm cố định theo đúng thứ tự **Smith (`HP < 50%`) → Archer 1 → Archer 2 → Hero 1..9** (trái sang phải, trên xuống dưới) với khoảng cách cố định **`0.30s`** giữa các skill, độ trễ vào trận **`0.45s`** và chu kỳ chụp khung hình **`0.22s`** để đảm bảo đúng chuỗi combo tướng.
+  - **Thứ tự cast skill**: ưu tiên **Smith (`HP < 50%`) → Archer 1 → Archer 2**, rồi duyệt Hero 1..9 (trái sang phải, trên xuống dưới) theo vòng. Nếu Archer hoặc Smith xen vào, tool tiếp tục tìm từ Hero sau Hero vừa cast, bỏ qua Hero chưa hồi; sau khi duyệt đến Hero 9 thì vòng lại Hero 1. Trận mới bắt đầu duyệt lại từ Hero 1.
+  - Giữ khoảng cách tối thiểu **`0.30s`** giữa các skill, độ trễ vào trận **`0.45s`** và chu kỳ chụp khung hình **`0.22s`**.
   - **Chạm lệch tâm chống bot**: các cú bấm ô skill dùng chạm nhanh **`35–60ms`** kèm lệch tọa độ nhẹ trong phạm vi ô để không làm trễ nhịp `0.30s`; các nút ngoài trận, nâng cấp, quảng cáo và CAPTCHA giữ chạm tự nhiên (`46–162ms`), độ trượt vi mô (`0–2px`), biến thiên nhịp phản xạ ngoài trận và tự nghỉ ngắn vài giây ở màn chính sau mỗi `18–32` trận.
   - Đặt tên file quay tạm trung lập trong Android (`/data/local/tmp/scr_*.mp4`) và tự xóa sạch sau mỗi lượt CAPTCHA.
 
