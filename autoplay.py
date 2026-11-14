@@ -129,6 +129,8 @@ SKIP_20_POINT = (639, 365)
 SKIP_30_POINT = (809, 365)
 SKIP_POINTS = {10: SKIP_10_POINT, 20: SKIP_20_POINT, 30: SKIP_30_POINT}
 SKIP_GEM_THRESHOLD = 30
+# Allow post-wave guild/ranking notices to clear before opening a Hero slot.
+WAVE_HERO_HOME_WAIT = 4.0
 SKIP_SLOTS = (
     (418, 522, 434, SKIP_10_POINT),
     (588, 692, 604, SKIP_20_POINT),
@@ -703,6 +705,7 @@ class Player:
         self.skip_offer = False
         self.gold_before = None
         self.after_victory = False
+        self.wave_hero_wait_pending = False
         self.skills_used = {}
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
@@ -862,6 +865,8 @@ class Player:
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
+            if self.mode == "wave" and self.tower is not None and self.tower.target == "hero":
+                self.wave_hero_wait_pending = True
         if name in {"home", "gold", "battle"} and screen.mimic is None:
             self.mimic_taps = 0
         if name in {"home", "battle"} and age >= 0.45:
@@ -881,6 +886,17 @@ class Player:
             self.skip_offer = True
             self.acted = True
             return Action("open gold ad (GET)", screen.point)
+        if (name == "home" and self.mode == "wave" and self.wave_hero_wait_pending
+                and self.tower is not None and self.tower.target == "hero"):
+            # Observe without starting the upgrade; if a reading just changed,
+            # allow it to stabilize before releasing the normal home actions.
+            if not self.tower.active:
+                self.tower.feed(time, screen, allow_start=False)
+                if time - self.tower.since < self.tower.stable_delay:
+                    return None
+            if age < WAVE_HERO_HOME_WAIT:
+                return None
+            self.wave_hero_wait_pending = False
         if self.tower is not None and name in {"home", "tower", "castles", "unknown"}:
             try:
                 handled, action = self.tower.feed(time, screen)
@@ -915,16 +931,22 @@ class Player:
             return None
         if name == "skip":
             if self.skip_waves and self.mode == "wave":
-                if screen.gems is None and age < 0.65:
-                    return None
                 options = dict(screen.skip_options)
                 if 30 not in options and screen.skip_30:
                     options[30] = SKIP_30_POINT
                 target_point = options.get(self.skip_waves)
-                if screen.gems is not None and screen.gems >= self.skip_waves and target_point is not None:
+                if screen.gems is not None and screen.gems < self.skip_waves:
+                    action = Action("close Wave Skip", screen.point)
+                elif screen.gems is not None and target_point is not None:
                     action = Action(f"select Wave Skip {self.skip_waves}", target_point)
                 else:
-                    action = Action("close Wave Skip", screen.point)
+                    # A partially rendered dialog or unreadable gem counter is not
+                    # evidence that Skip is unavailable. Keep sampling rather than
+                    # closing the offer before its selected button can be verified.
+                    if age >= 0.8 and not self.wait_notified:
+                        self.report(time, f"Wave Skip {self.skip_waves}: waiting for verified gems and button")
+                        self.wait_notified = True
+                    return None
             else:
                 action = Action("close Wave Skip", screen.point)
         elif name == "tower" and age >= max(0.35, self.menu_delay):

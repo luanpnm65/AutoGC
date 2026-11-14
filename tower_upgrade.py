@@ -229,7 +229,7 @@ class TowerUpgrade:
         self.missed_taps = 0
         return self.finish(time, name, layout)
 
-    def feed(self, time, screen):
+    def feed(self, time, screen, *, allow_start=True):
         self.last_seen_time = time
         reading = (
             screen.name,
@@ -253,6 +253,8 @@ class TowerUpgrade:
         name, gems, layout, level, cost, bulk_cost = reading
 
         if not self.active:
+            if not allow_start:
+                return False, None
             if self.batch is not None:
                 rearmed = (
                     self.rearmed_by_battle

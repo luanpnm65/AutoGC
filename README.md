@@ -90,7 +90,7 @@ Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riên
 | Màn chính | Tool nhận diện các nút từ ảnh mẫu và bấm **Battle** hoặc **Replay** theo chế độ đang chạy. Trong menu Replay, tool chọn ô **100%**. |
 | Đang đánh | Nhận diện cả thanh tiến trình **WAVE** lẫn thanh máu **BOSS** (dù đầy máu hay cạn máu), theo dõi thanh hồi kỹ năng của **2 đơn vị bên trái tháp** (ưu tiên bấm trước) cùng **9 ô Hero** trên tháp. Khi thanh xanh đầy, tool bấm một lần và chờ thanh rời trạng thái đầy trước khi bấm lại ở lần hồi tiếp theo. |
 | Rương **Mimic** | Ở mọi chế độ auto (`wave`, `replay`, màn thường, màn Boss hay màn chính), khi thấy rương **Mimic** mở miệng có bàn tay chỉ vào trên sân, tool ưu tiên bấm trực tiếp vào rương để nhận thưởng ngay. |
-| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--skip [10\|20\|30]` (mặc định `30` nếu không truyền số, hoặc `--mode skip` / `skip10` / `skip20` / `skip30`), nếu số **kim cương trắng** trên thanh đầu màn hình đạt từ mốc đã chọn trở lên (`>= 10`, `20` hoặc `30`, bỏ qua phần cộng thêm màu cam như `+500`), tool chọn đúng nút **10 / 20 / 30 WAVES**; nếu chưa đủ thì bấm **X** như bình thường. |
+| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--skip [10\|20\|30]` (mặc định `30` nếu không truyền số, hoặc `--mode skip` / `skip10` / `skip20` / `skip30`), nếu số **kim cương trắng** trên thanh đầu màn hình đạt từ mốc đã chọn trở lên (`>= 10`, `20` hoặc `30`, bỏ qua phần cộng thêm màu cam như `+500`), tool chọn đúng nút **10 / 20 / 30 WAVES**; nếu xác nhận chưa đủ thì bấm **X**. Nếu chưa đọc được kim cương hoặc chưa nhận diện được nút đã chọn, tool tiếp tục quan sát thay vì đóng sớm; hộp có thể tự hết giờ. |
 | **Victory** | Tool chờ về màn chính, ưu tiên hộp thưởng vàng nếu đã bật tự xem quảng cáo, rồi tiếp tục theo chế độ hiện tại. |
 | HP lâu đài về **0** | Tool nhận diện số 0 cùng thanh HP cạn, chuyển từ wave sang Replay và giữ Replay đến khi kết thúc phiên chạy. |
 | **CAPTCHA** | Tool tạm dừng đánh. Nếu bật `--auto-captcha`, tool thử chọn một lần. Khi cần giải tay, auto play chờ bạn xử lý rồi tiếp tục. |
@@ -111,7 +111,7 @@ Các ô Hero được đánh số **trái sang phải, trên xuống dưới**:
 10  11  12
 ```
 
-Chọn ô có Hero đã gắn. Nếu đang khôi phục một đợt nâng chưa kết thúc sau khi dừng chương trình, hãy chạy lại với ô cũ để xử lý xong đợt đó trước khi đổi ô.
+Chọn ô có Hero đã gắn. Sau khi kết thúc trận ở chế độ Wave (kể cả Skip), tool chờ màn chính ổn định thêm **4 giây** trước khi nâng Hero hoặc bắt đầu trận tiếp, để thông báo xếp hạng có thời gian biến mất. Chế độ Replay giữ nguyên thời gian như trước. Nếu đang khôi phục một đợt nâng chưa kết thúc sau khi dừng chương trình, hãy chạy lại với ô cũ để xử lý xong đợt đó trước khi đổi ô.
 
 ```powershell
 # Chạy Wave và tự nâng Hero góc trên bên phải khi kim cương trắng >= 50 (mặc định)
