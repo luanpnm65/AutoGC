@@ -171,9 +171,25 @@ MIMIC_TEMPLATE_B85 = (
 
 def viewport(image):
     width, height = image.size
-    if abs(width / height / (16 / 9) - 1) > 0.03:
+    if not width or not height or abs(width / height / (16 / 9) - 1) > 0.03:
         return None
     return image.convert("RGB").resize(VIEWPORT, Image.Resampling.BILINEAR)
+
+
+def _skill_bar_full(rgb, x, bar_y):
+    """Test one 49x5 skill bar using signed arithmetic on the supplied frame."""
+    bar = np.asarray(rgb[bar_y - 2:bar_y + 3, x - 24:x + 25], dtype=np.int16)
+    if bar.shape != (5, 49, 3):
+        return False
+    red, green, blue = bar.transpose(2, 0, 1)
+    cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
+    return cyan.mean() >= 0.92
+
+
+def detect_hero_skills(rgb):
+    """Return ready Hero indices 0..8 from the current normalized frame only."""
+    return [index for index, (_, x, bar_y, _) in enumerate(HERO_SKILLS)
+            if _skill_bar_full(rgb, x, bar_y)]
 
 
 def region(array, box):
@@ -632,15 +648,12 @@ class Vision:
             return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         if hud and self.matches(rgb, "speed") and (
                 self.matches(rgb, "wave") or self.matches_boss(rgb)):
-            ready = []
-            for index, (_, x, y, _) in enumerate(SKILLS):
-                red, green, blue = rgb[y-2:y+3, x-24:x+25].transpose(2, 0, 1)
-                cyan = (blue > 164) & (green > 105) & (blue - red > 65) & (green - red > 50)
-                if cyan.mean() >= 0.92:
-                    ready.append(index)
+            archers = [index for index, (_, x, bar_y, _) in enumerate(ARCHER_SKILLS)
+                       if _skill_bar_full(rgb, x, bar_y)]
+            heroes = [index + len(ARCHER_SKILLS) for index in detect_hero_skills(rgb)]
             return Screen(
                 "battle",
-                ready=tuple(ready),
+                ready=tuple(archers + heroes),
                 mimic=self.find_mimic(rgb),
                 smith_ready=self.smith_skill_ready(rgb),
                 hp_low=self.castle_hp_low(rgb),
@@ -742,7 +755,6 @@ class Player:
         self.after_victory = False
         self.wave_hero_wait_pending = False
         self.skills_used = {}
-        self.next_hero_skill = 0
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
         self.mimic_taps = 0
@@ -859,6 +871,8 @@ class Player:
             # The inline offer leaves the home controls and tower slots available.
             screen = replace(screen, name="home")
         name = screen.name
+        if name != "battle" or self.ad is not None or self.paused:
+            self.interrupt_skill_frames()
         target_bucket = (
             (screen.point[0] // 24, screen.point[1] // 24)
             if screen.point is not None and name in AD_CLOSE_SCREENS
@@ -898,7 +912,6 @@ class Player:
             self.report(time, "Castle HP reached zero: switched to Replay")
         if name == "victory":
             self.skills_used.clear()
-            self.next_hero_skill = 0
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
@@ -954,9 +967,11 @@ class Player:
         if name == "battle":
             if screen.mimic is not None and age >= 0.20:
                 if action := self.collect_mimic(time, screen.mimic):
+                    self.observe_skill_bars(screen.ready, smith_ready=screen.smith_ready)
                     self.last_skill = time
                     return action
             if age < 0.45:
+                self.observe_skill_bars(screen.ready, smith_ready=screen.smith_ready)
                 return None
             return self.cast(
                 time,
@@ -1012,7 +1027,6 @@ class Player:
                 if age < self.home_delay:
                     return None
                 self.skills_used.clear()
-                self.next_hero_skill = 0
                 if self.mode == "wave":
                     action = Action("start next Battle", (1191, 648))
                 else:
@@ -1022,7 +1036,17 @@ class Player:
         self.acted = True
         return action
 
-    def cast(self, time, ready, *, smith_ready=False, hp_low=False):
+    def interrupt_skill_frames(self):
+        # An unobserved bar cannot count toward two consecutive non-full frames.
+        for index in self.skills_used:
+            self.skills_used[index] = 0
+
+    def invalidate_frame(self, time):
+        self.interrupt_skill_frames()
+        if self.screen == "battle":
+            self.screen, self.screen_target, self.since = "unknown", None, time
+
+    def observe_skill_bars(self, ready, *, smith_ready=False):
         if "smith" in self.skills_used:
             self.skills_used["smith"] = 0 if smith_ready else self.skills_used["smith"] + 1
             if self.skills_used["smith"] >= 2:
@@ -1033,6 +1057,9 @@ class Player:
             self.skills_used[index] = 0 if index in ready else self.skills_used[index] + 1
             if self.skills_used[index] >= 2:
                 del self.skills_used[index]
+
+    def cast(self, time, ready, *, smith_ready=False, hp_low=False):
+        self.observe_skill_bars(ready, smith_ready=smith_ready)
         if time - self.last_skill < 0.30:
             return None
         if smith_ready and hp_low and "smith" not in self.skills_used:
@@ -1040,23 +1067,12 @@ class Player:
             self.last_skill = time
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
-        # Smith and both Archers take priority but must not reset the Hero cursor.
-        for index in range(len(ARCHER_SKILLS)):
+        # Smith and Archers remain higher-priority; Hero skills are always
+        # examined from slot 1 through slot 9 on every decision.
+        for index, (label, x, _, y) in enumerate(SKILLS):
             if index in ready and index not in self.skills_used:
                 self.skills_used[index] = 0
                 self.last_skill = time
-                label, x, _, y = SKILLS[index]
-                return Action(f"cast {label}", (x, y))
-        # Continue from the Hero after the last one cast, skipping unavailable
-        # skills and wrapping to Hero 1 only after reaching Hero 9.
-        for offset in range(len(HERO_SKILLS)):
-            hero = (self.next_hero_skill + offset) % len(HERO_SKILLS)
-            index = len(ARCHER_SKILLS) + hero
-            if index in ready and index not in self.skills_used:
-                self.skills_used[index] = 0
-                self.next_hero_skill = (hero + 1) % len(HERO_SKILLS)
-                self.last_skill = time
-                label, x, _, y = SKILLS[index]
                 return Action(f"cast {label}", (x, y))
         return None
 
@@ -1174,11 +1190,16 @@ def play(args, target, report, journal):
 
     captcha_attempts = 0
     last_captcha_attempt = float("-inf")
+    last_cast_sent_at = None
     for time, original in frames:
+        normalized = viewport(original)
+        if normalized is None:
+            player.invalidate_frame(time)
+            continue
         activity = None
         if args.video:
             screen = vision.classify(
-                viewport(original),
+                normalized,
                 watching_ad=player.ad is not None,
                 original=original,
                 time=time,
@@ -1190,7 +1211,7 @@ def play(args, target, report, journal):
                 # An ad can show footage of a game. Its Android window owns the
                 # frame until it closes, even if the image resembles a game screen.
                 screen = vision.classify(
-                    viewport(original),
+                    normalized,
                     watching_ad=player.ad is not None,
                     ad_foreground=is_ad_activity(activity),
                     original=original,
@@ -1204,6 +1225,7 @@ def play(args, target, report, journal):
                 vision.ad_closer.reset()
                 screen = Screen("unfocused")
         was_paused = player.paused
+        previous_last_skill = player.last_skill
         action = player.feed(time, screen)
         if not player.paused:
             captcha_attempts = 0
@@ -1238,7 +1260,29 @@ def play(args, target, report, journal):
                 report(time, f"{prefix} {action.name}")
             else:
                 tap_logged = action.point
+                hero_cast = action.name.startswith("cast skill ")
+                cast_action = action.name.startswith("cast ")
                 if args.tap:
+                    if cast_action and last_cast_sent_at is not None:
+                        sleep(max(0, 0.30 - (monotonic() - last_cast_sent_at)))
+                    if hero_cast:
+                        package, current_activity = foreground_window(target.adb, target.serial)
+                        if (package != "com.raongames.growcastle" or not current_activity
+                                or is_ad_activity(current_activity) or current_activity != activity):
+                            # The decision was never sent: release its latch and cooldown,
+                            # and require a fresh stable battle before trying again.
+                            hero_number = int(action.name.removeprefix("cast skill "))
+                            player.skills_used.pop(len(ARCHER_SKILLS) + hero_number - 1, None)
+                            player.last_skill = previous_last_skill
+                            player.invalidate_frame(time)
+                            report(time, "Hero cast skipped: game is no longer in the foreground")
+                            continue
+                        x = round(action.point[0] * original.width / VIEWPORT[0])
+                        y = round(action.point[1] * original.height / VIEWPORT[1])
+                        adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
+                        last_cast_sent_at = monotonic()
+                        report(time, f"{prefix} {action.name} {(x, y)}")
+                        continue
                     if action.charge is not None:
                         expected_gems, expected_level, expected_cost, step_levels = action.charge
                         raw = adb_run(target.adb, target.serial, "exec-out", "screencap", "-p")
@@ -1272,9 +1316,14 @@ def play(args, target, report, journal):
                             y = round(action.point[1] * original.height / VIEWPORT[1])
                         adb_run(target.adb, target.serial, "shell", "input", "tap", str(x), str(y))
                         tap_logged = (x, y)
+                    if cast_action:
+                        last_cast_sent_at = monotonic()
                 elif action.charge is not None:
                     tower.record_tap(action)
-                report(time, f"{prefix} {action.name} {tap_logged}")
+                if not args.tap and hero_cast:
+                    print(f"PREVIEW {action.name} {tap_logged}", flush=True)
+                else:
+                    report(time, f"{prefix} {action.name} {tap_logged}")
 
 
 def _device_lock_key(target) -> str:
