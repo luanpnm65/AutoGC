@@ -13,7 +13,9 @@ GEM_THRESHOLD = 50
 UPGRADE_COUNT = 50
 VALID_COSTS = (1, 2, 3)
 VALID_BULK_COSTS = range(10, 31)
-HERO_SLOT = (461, 92)
+# Home-screen hero slots, numbered left to right and top to bottom.
+HERO_SLOTS = tuple((x, y) for y in (92, 184, 277, 370) for x in (293, 373, 461))
+DEFAULT_HERO_SLOT = 3
 TOWER_LAYER_TOGGLE = (380, 457)
 LIGHTNING_LAYER = (380, 366)
 EXIT_LAYER_VIEW = (550, 90)
@@ -42,6 +44,8 @@ class Batch:
     pending_levels: int = 1
     done: bool = False
     closed: bool = False
+    # None denotes a tower batch or a legacy hero journal (slot 3).
+    hero_slot: int | None = None
 
     def validate(self):
         valid_pending = (
@@ -58,6 +62,8 @@ class Batch:
                 or type(self.pending_levels) is not int or self.pending_levels not in (1, 10)
                 or type(self.done) is not bool
                 or type(self.closed) is not bool
+                or (self.hero_slot is not None
+                    and (type(self.hero_slot) is not int or not 1 <= self.hero_slot <= len(HERO_SLOTS)))
                 or not valid_pending
                 or (self.pending_cost is not None and self.done)
                 or (self.closed and self.pending_cost is not None)):
@@ -94,6 +100,7 @@ class TowerUpgrade:
         journal=None,
         *,
         target="tower",
+        hero_slot=DEFAULT_HERO_SLOT,
         gem_threshold=GEM_THRESHOLD,
         upgrade_count=None,
         humanize=False,
@@ -101,12 +108,15 @@ class TowerUpgrade:
     ):
         if target not in {"hero", "tower"}:
             raise ValueError(f"Unsupported upgrade target: {target!r}")
+        if type(hero_slot) is not int or not 1 <= hero_slot <= len(HERO_SLOTS):
+            raise ValueError("hero_slot must be an integer between 1 and 12")
         if gem_threshold < 1:
             raise ValueError("gem_threshold must be >= 1")
         max_upgrades = upgrade_count if upgrade_count is not None else max(UPGRADE_COUNT, gem_threshold)
         if max_upgrades < 1:
             raise ValueError("upgrade_count must be >= 1")
         self.target = target
+        self.hero_slot = hero_slot
         self.label = "Hero" if target == "hero" else "Tower"
         self.gem_threshold = gem_threshold
         self.upgrade_count = max_upgrades
@@ -125,6 +135,14 @@ class TowerUpgrade:
                 except (TypeError, ValueError):
                     batch = None
                 if batch is not None:
+                    # An unfinished journal may refer to a different hero whose detail
+                    # panel is still open. Never apply its recovery to another slot.
+                    old_slot = batch.hero_slot or DEFAULT_HERO_SLOT
+                    if target == "hero" and not batch.closed and old_slot != hero_slot:
+                        raise ValueError(
+                            f"Unfinished Hero upgrade for slot {old_slot}; restart with "
+                            f"--hero-slot {old_slot} and finish it before selecting slot {hero_slot}."
+                        )
                     if not batch.closed and batch.pending_cost is None and not batch.done:
                         batch = None
                     else:
@@ -170,7 +188,8 @@ class TowerUpgrade:
         """Abort the current upgrade batch and exit cleanly back to Home so waves resume."""
         self.report(time, f"{message} Exiting upgrade menu to resume play.")
         if self.batch is None:
-            self.batch = Batch(self.gem_threshold, 1, self.restore_hero, done=True)
+            self.batch = Batch(self.gem_threshold, 1, self.restore_hero, done=True,
+                               hero_slot=self.hero_slot if self.target == "hero" else None)
         else:
             self.batch.pending_cost = None
             self.batch.pending_levels = 1
@@ -305,7 +324,8 @@ class TowerUpgrade:
                 if layout == "castle":
                     return self.navigate(time, "restore hero slots", EXIT_LAYER_VIEW, "home", "hero")
                 if layout == "hero":
-                    return self.navigate(time, "open top-right Hero", HERO_SLOT, "tower")
+                    return self.navigate(time, f"open Hero slot {self.hero_slot}",
+                                         HERO_SLOTS[self.hero_slot - 1], "tower")
             else:
                 if layout == "hero":
                     self.restore_hero = True
@@ -357,7 +377,8 @@ class TowerUpgrade:
                     time, name, layout,
                     f"{self.label} upgrade stopped before tapping ({gems} white gems < {cost}): closing menu",
                 )
-            self.batch = Batch(gems, level, self.restore_hero)
+            self.batch = Batch(gems, level, self.restore_hero,
+                               hero_slot=self.hero_slot if self.target == "hero" else None)
             self.save()
 
         batch = self.batch

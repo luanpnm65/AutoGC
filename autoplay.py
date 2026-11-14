@@ -30,6 +30,7 @@ from emulator import (
 )
 from tower_upgrade import (
     Action,
+    DEFAULT_HERO_SLOT,
     DETAIL_CLOSE,
     EXIT_LAYER_VIEW,
     GEM_THRESHOLD,
@@ -1052,6 +1053,7 @@ def play(args, target, report, journal):
             report,
             journal,
             target=upgrade_target,
+            hero_slot=getattr(args, "hero_slot", None) or DEFAULT_HERO_SLOT,
             gem_threshold=gem_threshold,
             upgrade_count=args.upgrade_levels,
             humanize=use_humanize,
@@ -1227,7 +1229,9 @@ def main():
     parser.add_argument("--auto-captcha", action=argparse.BooleanOptionalAction, default=True,
                         help="solve diamond CAPTCHA automatically when --tap is enabled (default: enabled)")
     parser.add_argument("--upgrade-hero", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
-                        help="upgrade the top-right Hero when white gems >= GEMS (default: 50)")
+                        help="upgrade the selected Hero when white gems >= GEMS (default: 50)")
+    parser.add_argument("--hero-slot", type=int, choices=range(1, 13), metavar="{1..12}",
+                        help="Hero slot to upgrade, left to right and top to bottom (default: 3)")
     parser.add_argument("--upgrade-tower", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
                         help="upgrade the Castle tower when white gems >= GEMS (default: 50)")
     parser.add_argument("--upgrade-gems", type=int, metavar="GEMS",
@@ -1239,6 +1243,8 @@ def main():
         parser.error("--video is preview only")
     if args.upgrade_hero is not None and args.upgrade_tower is not None:
         parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
+    if args.hero_slot is not None and args.upgrade_hero is None:
+        parser.error("--hero-slot requires --upgrade-hero")
     if (args.upgrade_gems is not None or args.upgrade_levels is not None) and (
             args.upgrade_hero is None and args.upgrade_tower is None):
         parser.error("--upgrade-gems and --upgrade-levels require --upgrade-hero or --upgrade-tower")
