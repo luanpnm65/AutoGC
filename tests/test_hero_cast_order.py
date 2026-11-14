@@ -91,6 +91,26 @@ class HeroDecisionTests(unittest.TestCase):
                          "cast archer skill 2")
         self.assertEqual(player.cast(5, (6,)).name, "cast skill 5")
 
+    def test_shared_020_second_interval_for_smith_archer_and_heroes(self):
+        for humanize in (False, True):
+            with self.subTest(humanize=humanize):
+                player = self.make_player(humanize)
+                ready = (0, 1, 2, 3)
+                self.assertEqual(player.cast(0, ready, smith_ready=True, hp_low=True).name,
+                                 "cast Smith (HP < 50%)")
+                self.assertIsNone(player.cast(0.199, ready, smith_ready=True, hp_low=True))
+                self.assertEqual(player.cast(0.2, ready, smith_ready=True, hp_low=True).name,
+                                 "cast archer skill 1")
+                self.assertIsNone(player.cast(0.39, ready, smith_ready=True, hp_low=True))
+                self.assertEqual(player.cast(0.41, ready, smith_ready=True, hp_low=True).name,
+                                 "cast archer skill 2")
+                self.assertIsNone(player.cast(0.60, ready, smith_ready=True, hp_low=True))
+                self.assertEqual(player.cast(0.62, ready, smith_ready=True, hp_low=True).name,
+                                 "cast skill 1")
+                self.assertIsNone(player.cast(0.81, ready, smith_ready=True, hp_low=True))
+                self.assertEqual(player.cast(0.83, ready, smith_ready=True, hp_low=True).name,
+                                 "cast skill 2")
+
     def test_latch_requires_two_consecutive_non_full_battle_frames(self):
         player = self.make_player()
         self.assertEqual(player.cast(0, (2,)).name, "cast skill 1")
@@ -130,8 +150,8 @@ class HeroDecisionTests(unittest.TestCase):
                 self.assertIsNone(player.feed(0, battle))
                 self.assertIsNone(player.feed(0.44, battle))
                 self.assertEqual(player.feed(0.45, battle).name, "cast skill 1")
-                self.assertIsNone(player.feed(0.74, battle))
-                self.assertEqual(player.feed(0.76, battle).name, "cast skill 2")
+                self.assertIsNone(player.feed(0.64, battle))
+                self.assertEqual(player.feed(0.66, battle).name, "cast skill 2")
                 player.feed(1, Screen("victory"))
                 self.assertEqual(player.skills_used, {})
                 player.feed(2, Screen("home"))
@@ -185,7 +205,7 @@ class HeroPlayTests(unittest.TestCase):
             autoplay.play(self.args(tap=True), self.target(), lambda *args: None, None)
             human.assert_called_once()
             adb.assert_called_once_with(Path("adb"), "device", "shell", "input", "tap", "293", "184")
-            self.assertAlmostEqual(sleep.call_args.args[0], 0.2)
+            self.assertAlmostEqual(sleep.call_args.args[0], 0.1)
 
     def test_foreground_change_cancels_tap_and_allows_safe_retry(self):
         frame = Image.new("RGB", (1280, 720))

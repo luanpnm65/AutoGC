@@ -129,6 +129,8 @@ SKIP_20_POINT = (639, 365)
 SKIP_30_POINT = (809, 365)
 SKIP_POINTS = {10: SKIP_10_POINT, 20: SKIP_20_POINT, 30: SKIP_30_POINT}
 SKIP_GEM_THRESHOLD = 30
+SKILL_CAST_INTERVAL = 0.20
+ADB_FRAME_INTERVAL = 0.18
 # Allow post-wave guild/ranking notices to clear before opening a Hero slot.
 WAVE_HERO_HOME_WAIT = 4.0
 SKIP_SLOTS = (
@@ -488,11 +490,12 @@ class Vision:
             return np.mean(difference) < tolerance
         if np.mean(difference[self.wave_text]) < tolerance:
             return True
-        # The top HUD text in native ADB captures is one pixel below the
-        # recorded MP4 samples and has sharper edges.
+        # Native ADB text can be one pixel lower and sharper than the MP4
+        # template. Allow a small margin for its anti-aliasing while still
+        # requiring the WAVE glyph, HUD and speed button to match.
         left, top, right, bottom = box
         shifted = region(rgb, (left, top + 1, right, bottom + 1))
-        return np.mean(np.abs(shifted - template)[self.wave_text]) < 20
+        return np.mean(np.abs(shifted - template)[self.wave_text]) < 23
 
     def hp_empty(self, rgb, dim):
         threshold = 53 if dim else 145
@@ -623,11 +626,17 @@ class Vision:
         if panel is not None and panel[0] == "tower":
             kind, gems, level, cost, bulk_cost = panel
             return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
-        hud = self.matches(rgb, "hud")
+        # ADB captures and emulator scaling can shift the UI vertically by a
+        # few pixels. Require the HUD and battle markers to agree on the same
+        # offset rather than relaxing their matching thresholds.
+        hud_offsets = tuple(dy for dy in (0, -1, 1, -2, 2, -3, 3)
+                            if self.matches(rgb, "hud", dy))
+        hud = bool(hud_offsets)
         dim = not hud and self.matches(rgb, "hud_dim")
         if (hud or dim) and self.hp_empty(rgb, dim):
             return Screen("defeat")
-        if hud and self.matches(rgb, "skip_title") and self.matches(rgb, "skip_close"):
+        if hud and any(self.matches(rgb, "skip_title", dy) and self.matches(rgb, "skip_close", dy)
+                       for dy in hud_offsets):
             options = self.detect_skip_options(rgb, target_tier=self.skip_tier)
             return Screen(
                 "skip",
@@ -646,8 +655,9 @@ class Vision:
         if panel is not None:
             kind, gems, level, cost, bulk_cost = panel
             return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
-        if hud and self.matches(rgb, "speed") and (
-                self.matches(rgb, "wave") or self.matches_boss(rgb)):
+        speed_offsets = tuple(dy for dy in hud_offsets if self.matches(rgb, "speed", dy))
+        if speed_offsets and (any(self.matches(rgb, "wave", dy) for dy in speed_offsets)
+                              or self.matches_boss(rgb)):
             archers = [index for index, (_, x, bar_y, _) in enumerate(ARCHER_SKILLS)
                        if _skill_bar_full(rgb, x, bar_y)]
             heroes = [index + len(ARCHER_SKILLS) for index in detect_hero_skills(rgb)]
@@ -762,7 +772,7 @@ class Player:
         self.home_delay = 0.85
         self.menu_delay = 0.20
         self.victory_wait = 1.60
-        self.skill_cooldown = 0.30
+        self.skill_cooldown = SKILL_CAST_INTERVAL
         self.waves_completed = 0
         self.in_battle = False
         self.next_break_waves = self.rng.randint(18, 32)
@@ -1060,7 +1070,7 @@ class Player:
 
     def cast(self, time, ready, *, smith_ready=False, hp_low=False):
         self.observe_skill_bars(ready, smith_ready=smith_ready)
-        if time - self.last_skill < 0.30:
+        if time - self.last_skill < self.skill_cooldown:
             return None
         if smith_ready and hp_low and "smith" not in self.skills_used:
             self.skills_used["smith"] = 0
@@ -1107,7 +1117,7 @@ def adb_frames(adb, serial, seconds, *, humanize=True):
         raw = adb_run(adb, serial, "exec-out", "screencap", "-p")
         with Image.open(BytesIO(raw)) as screen:
             yield sample - start, screen.copy()
-        sleep(max(0, 0.22 - (monotonic() - sample)))
+        sleep(max(0, ADB_FRAME_INTERVAL - (monotonic() - sample)))
 
 
 def replay_frames(video):
@@ -1264,7 +1274,7 @@ def play(args, target, report, journal):
                 cast_action = action.name.startswith("cast ")
                 if args.tap:
                     if cast_action and last_cast_sent_at is not None:
-                        sleep(max(0, 0.30 - (monotonic() - last_cast_sent_at)))
+                        sleep(max(0, SKILL_CAST_INTERVAL - (monotonic() - last_cast_sent_at)))
                     if hero_cast:
                         package, current_activity = foreground_window(target.adb, target.serial)
                         if (package != "com.raongames.growcastle" or not current_activity
