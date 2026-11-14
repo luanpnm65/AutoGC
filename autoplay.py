@@ -30,6 +30,7 @@ from emulator import (
 )
 from tower_upgrade import (
     Action,
+    DEFAULT_HERO_SLOT,
     DETAIL_CLOSE,
     EXIT_LAYER_VIEW,
     GEM_THRESHOLD,
@@ -128,6 +129,8 @@ SKIP_20_POINT = (639, 365)
 SKIP_30_POINT = (809, 365)
 SKIP_POINTS = {10: SKIP_10_POINT, 20: SKIP_20_POINT, 30: SKIP_30_POINT}
 SKIP_GEM_THRESHOLD = 30
+# Allow post-wave guild/ranking notices to clear before opening a Hero slot.
+WAVE_HERO_HOME_WAIT = 4.0
 SKIP_SLOTS = (
     (418, 522, 434, SKIP_10_POINT),
     (588, 692, 604, SKIP_20_POINT),
@@ -212,7 +215,8 @@ class Screen:
 
 
 class Vision:
-    def __init__(self, upgrade_tower=True):
+    def __init__(self, upgrade_tower=True, *, skip_tier=0):
+        self.skip_tier = skip_tier
         atlas_path = Path(__file__).with_name("play_templates.npz")
         with np.load(atlas_path, allow_pickle=False) as atlas:
             self.templates = {name: atlas[name].astype(np.int16) for name in TEMPLATES}
@@ -256,8 +260,42 @@ class Vision:
     def white_gems(self, rgb):
         return read_white_gems(rgb, self.gem_templates)
 
-    def detect_skip_options(self, rgb) -> tuple[tuple[int, tuple[int, int]], ...]:
+    def detect_skip_options(self, rgb, *, target_tier=0) -> tuple[tuple[int, tuple[int, int]], ...]:
         height, width = SKIP_30_MASK_SHAPE
+        # Try the chosen tier first at its usual location. A high-confidence
+        # label match is still required; never spend based on position alone.
+        if target_tier in SKIP_TIERS:
+            preferred = SKIP_SLOTS[SKIP_TIERS.index(target_tier)]
+            for bx1, bx2, gx, center in (preferred, *(slot for slot in SKIP_SLOTS if slot != preferred)):
+                button = rgb[316:415, bx1:bx2]
+                red, green, blue = button[:, :, 0], button[:, :, 1], button[:, :, 2]
+                gold = (red > 180) & (green > 115) & (blue < 75) & (red.astype(np.int16) - blue.astype(np.int16) > 120)
+                cost_area = rgb[426:460, bx1:bx2]
+                cr, cg, cb = cost_area[:, :, 0], cost_area[:, :, 1], cost_area[:, :, 2]
+                cyan = (cb > 170) & (cg > 130) & (cb.astype(np.int16) - cr.astype(np.int16) > 60)
+                if gold.mean() < 0.42 or cyan.mean() < 0.04:
+                    continue
+                mask = self.skip_masks[target_tier]
+                for dy in (0, -1, 1, -2, 2, -3, 3):
+                    for dx in (0, -1, 1, -2, 2, -3, 3):
+                        sub = rgb[335 + dy:335 + dy + height, gx + dx:gx + dx + width]
+                        observed = (sub.min(axis=2) > 175) & (np.ptp(sub, axis=2) < 42)
+                        union = np.count_nonzero(observed | mask)
+                        lead_union = np.count_nonzero(observed[:, :36] | mask[:, :36])
+                        if not union or not lead_union:
+                            continue
+                        score = np.count_nonzero(observed & mask) / union
+                        lead = np.count_nonzero(observed[:, :36] & mask[:, :36]) / lead_union
+                        if score < 0.88 or lead < 0.80:
+                            continue
+                        rivals = []
+                        for tier, other in self.skip_masks.items():
+                            if tier != target_tier:
+                                other_union = np.count_nonzero(observed | other)
+                                rivals.append(np.count_nonzero(observed & other) / other_union if other_union else 0)
+                        if all(score >= other + 0.08 for other in rivals):
+                            return ((target_tier, center),)
+        # Unclear labels take the original, more exhaustive matching path.
         found: dict[int, tuple[int, int]] = {}
         for bx1, bx2, gx, center in SKIP_SLOTS:
             button = rgb[316:415, bx1:bx2]
@@ -574,7 +612,7 @@ class Vision:
         if (hud or dim) and self.hp_empty(rgb, dim):
             return Screen("defeat")
         if hud and self.matches(rgb, "skip_title") and self.matches(rgb, "skip_close"):
-            options = self.detect_skip_options(rgb)
+            options = self.detect_skip_options(rgb, target_tier=self.skip_tier)
             return Screen(
                 "skip",
                 SKIP_CLOSE_POINT,
@@ -702,7 +740,9 @@ class Player:
         self.skip_offer = False
         self.gold_before = None
         self.after_victory = False
+        self.wave_hero_wait_pending = False
         self.skills_used = {}
+        self.next_hero_skill = 0
         self.last_skill = float("-inf")
         self.last_mimic = float("-inf")
         self.mimic_taps = 0
@@ -858,9 +898,12 @@ class Player:
             self.report(time, "Castle HP reached zero: switched to Replay")
         if name == "victory":
             self.skills_used.clear()
+            self.next_hero_skill = 0
             self.after_victory = self.watch_ads
         elif name == "battle":
             self.after_victory = False
+            if self.mode == "wave" and self.tower is not None and self.tower.target == "hero":
+                self.wave_hero_wait_pending = True
         if name in {"home", "gold", "battle"} and screen.mimic is None:
             self.mimic_taps = 0
         if name in {"home", "battle"} and age >= 0.45:
@@ -880,6 +923,17 @@ class Player:
             self.skip_offer = True
             self.acted = True
             return Action("open gold ad (GET)", screen.point)
+        if (name == "home" and self.mode == "wave" and self.wave_hero_wait_pending
+                and self.tower is not None and self.tower.target == "hero"):
+            # Observe without starting the upgrade; if a reading just changed,
+            # allow it to stabilize before releasing the normal home actions.
+            if not self.tower.active:
+                self.tower.feed(time, screen, allow_start=False)
+                if time - self.tower.since < self.tower.stable_delay:
+                    return None
+            if age < WAVE_HERO_HOME_WAIT:
+                return None
+            self.wave_hero_wait_pending = False
         if self.tower is not None and name in {"home", "tower", "castles", "unknown"}:
             try:
                 handled, action = self.tower.feed(time, screen)
@@ -910,20 +964,34 @@ class Player:
                 smith_ready=screen.smith_ready,
                 hp_low=screen.hp_low,
             )
-        if self.acted or age < self.menu_delay:
+        if self.acted:
+            return None
+        # The offer's own countdown is short: a verified requested tier should
+        # be tapped on the first frame, not after the ordinary menu delay.
+        urgent_skip = name == "skip" and self.skip_waves and self.mode == "wave"
+        if age < self.menu_delay and not urgent_skip:
             return None
         if name == "skip":
             if self.skip_waves and self.mode == "wave":
-                if screen.gems is None and age < 0.65:
-                    return None
                 options = dict(screen.skip_options)
                 if 30 not in options and screen.skip_30:
                     options[30] = SKIP_30_POINT
                 target_point = options.get(self.skip_waves)
-                if screen.gems is not None and screen.gems >= self.skip_waves and target_point is not None:
+                if screen.gems is not None and screen.gems < self.skip_waves:
+                    action = Action("close Wave Skip", screen.point)
+                elif screen.gems is not None and target_point is not None:
                     action = Action(f"select Wave Skip {self.skip_waves}", target_point)
                 else:
-                    action = Action("close Wave Skip", screen.point)
+                    # A partially rendered dialog or unreadable gem counter is not
+                    # evidence that Skip is unavailable. Keep sampling rather than
+                    # closing the offer before its selected button can be verified.
+                    if not self.wait_notified:
+                        available = ",".join(str(tier) for tier in sorted(options)) or "none"
+                        gems = str(screen.gems) if screen.gems is not None else "unreadable"
+                        self.report(time, f"Wave Skip {self.skip_waves}: waiting for verification "
+                                          f"(white gems: {gems}; detected buttons: {available})")
+                        self.wait_notified = True
+                    return None
             else:
                 action = Action("close Wave Skip", screen.point)
         elif name == "tower" and age >= max(0.35, self.menu_delay):
@@ -944,6 +1012,7 @@ class Player:
                 if age < self.home_delay:
                     return None
                 self.skills_used.clear()
+                self.next_hero_skill = 0
                 if self.mode == "wave":
                     action = Action("start next Battle", (1191, 648))
                 else:
@@ -971,9 +1040,21 @@ class Player:
             self.last_skill = time
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
-        for index in ready:
-            if index not in self.skills_used:
+        # Smith and both Archers take priority but must not reset the Hero cursor.
+        for index in range(len(ARCHER_SKILLS)):
+            if index in ready and index not in self.skills_used:
                 self.skills_used[index] = 0
+                self.last_skill = time
+                label, x, _, y = SKILLS[index]
+                return Action(f"cast {label}", (x, y))
+        # Continue from the Hero after the last one cast, skipping unavailable
+        # skills and wrapping to Hero 1 only after reaching Hero 9.
+        for offset in range(len(HERO_SKILLS)):
+            hero = (self.next_hero_skill + offset) % len(HERO_SKILLS)
+            index = len(ARCHER_SKILLS) + hero
+            if index in ready and index not in self.skills_used:
+                self.skills_used[index] = 0
+                self.next_hero_skill = (hero + 1) % len(HERO_SKILLS)
                 self.last_skill = time
                 label, x, _, y = SKILLS[index]
                 return Action(f"cast {label}", (x, y))
@@ -1052,6 +1133,7 @@ def play(args, target, report, journal):
             report,
             journal,
             target=upgrade_target,
+            hero_slot=getattr(args, "hero_slot", None) or DEFAULT_HERO_SLOT,
             gem_threshold=gem_threshold,
             upgrade_count=args.upgrade_levels,
             humanize=use_humanize,
@@ -1069,7 +1151,7 @@ def play(args, target, report, journal):
         skip_waves=skip_tier,
         humanize=use_humanize,
     )
-    vision = Vision(True)
+    vision = Vision(True, skip_tier=skip_tier if is_wave_mode else 0)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
@@ -1179,7 +1261,7 @@ def play(args, target, report, journal):
                             viewport_size=VIEWPORT,
                             raw_point=action.raw_point,
                             jitter=action_jitter(action),
-                            duration_range=(35, 60) if action.name.startswith("cast ") else None,
+                            duration_range=(35, 60) if action.name.startswith(("cast ", "select Wave Skip ")) else None,
                             rng=_PLAY_RNG,
                         )
                     else:
@@ -1227,7 +1309,9 @@ def main():
     parser.add_argument("--auto-captcha", action=argparse.BooleanOptionalAction, default=True,
                         help="solve diamond CAPTCHA automatically when --tap is enabled (default: enabled)")
     parser.add_argument("--upgrade-hero", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
-                        help="upgrade the top-right Hero when white gems >= GEMS (default: 50)")
+                        help="upgrade the selected Hero when white gems >= GEMS (default: 50)")
+    parser.add_argument("--hero-slot", type=int, choices=range(1, 13), metavar="{1..12}",
+                        help="Hero slot to upgrade, left to right and top to bottom (default: 3)")
     parser.add_argument("--upgrade-tower", nargs="?", const=GEM_THRESHOLD, type=int, metavar="GEMS",
                         help="upgrade the Castle tower when white gems >= GEMS (default: 50)")
     parser.add_argument("--upgrade-gems", type=int, metavar="GEMS",
@@ -1239,6 +1323,8 @@ def main():
         parser.error("--video is preview only")
     if args.upgrade_hero is not None and args.upgrade_tower is not None:
         parser.error("choose either --upgrade-hero or --upgrade-tower, not both")
+    if args.hero_slot is not None and args.upgrade_hero is None:
+        parser.error("--hero-slot requires --upgrade-hero")
     if (args.upgrade_gems is not None or args.upgrade_levels is not None) and (
             args.upgrade_hero is None and args.upgrade_tower is None):
         parser.error("--upgrade-gems and --upgrade-levels require --upgrade-hero or --upgrade-tower")

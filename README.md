@@ -90,7 +90,7 @@ Chỉ `--tap` mới gửi thao tác bấm. Mỗi instance có khóa phiên riên
 | Màn chính | Tool nhận diện các nút từ ảnh mẫu và bấm **Battle** hoặc **Replay** theo chế độ đang chạy. Trong menu Replay, tool chọn ô **100%**. |
 | Đang đánh | Nhận diện cả thanh tiến trình **WAVE** lẫn thanh máu **BOSS** (dù đầy máu hay cạn máu), theo dõi thanh hồi kỹ năng của **2 đơn vị bên trái tháp** (ưu tiên bấm trước) cùng **9 ô Hero** trên tháp. Khi thanh xanh đầy, tool bấm một lần và chờ thanh rời trạng thái đầy trước khi bấm lại ở lần hồi tiếp theo. |
 | Rương **Mimic** | Ở mọi chế độ auto (`wave`, `replay`, màn thường, màn Boss hay màn chính), khi thấy rương **Mimic** mở miệng có bàn tay chỉ vào trên sân, tool ưu tiên bấm trực tiếp vào rương để nhận thưởng ngay. |
-| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--skip [10\|20\|30]` (mặc định `30` nếu không truyền số, hoặc `--mode skip` / `skip10` / `skip20` / `skip30`), nếu số **kim cương trắng** trên thanh đầu màn hình đạt từ mốc đã chọn trở lên (`>= 10`, `20` hoặc `30`, bỏ qua phần cộng thêm màu cam như `+500`), tool chọn đúng nút **10 / 20 / 30 WAVES**; nếu chưa đủ thì bấm **X** như bình thường. |
+| Hộp **Wave Skip** | Mặc định bấm **X** để đóng hộp và tiếp tục đánh. Khi bật `--skip [10\|20\|30]` (mặc định `30` nếu không truyền số, hoặc `--mode skip` / `skip10` / `skip20` / `skip30`), tool ưu tiên nhận diện mốc đã chọn và bấm ngay khi xác nhận đủ **kim cương trắng** và đúng nút **10 / 20 / 30 WAVES**; nếu xác nhận chưa đủ thì bấm **X**. Nếu chưa đọc được kim cương hoặc chưa nhận diện được nút, tool ghi lý do và tiếp tục quan sát; hộp có thể tự hết giờ trước khi nhận diện được. |
 | **Victory** | Tool chờ về màn chính, ưu tiên hộp thưởng vàng nếu đã bật tự xem quảng cáo, rồi tiếp tục theo chế độ hiện tại. |
 | HP lâu đài về **0** | Tool nhận diện số 0 cùng thanh HP cạn, chuyển từ wave sang Replay và giữ Replay đến khi kết thúc phiên chạy. |
 | **CAPTCHA** | Tool tạm dừng đánh. Nếu bật `--auto-captcha`, tool thử chọn một lần. Khi cần giải tay, auto play chờ bạn xử lý rồi tiếp tục. |
@@ -100,15 +100,26 @@ Tool lấy ảnh qua ADB, chuẩn hóa ảnh về 1280 × 720 để đối chi�
 
 ### Nâng Hero hoặc Tháp bằng kim cương
 
-Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` (nâng Hero gắn ở ô góc trên bên phải của lâu đài) hoặc `--upgrade-tower [SỐ_KC]` (nâng tầng tháp thứ hai từ dưới lên) kết hợp cùng bất kỳ chế độ đánh nào (`wave`, `skip`, `replay`). Nếu không truyền số theo sau thì mặc định kích hoạt ở mốc **50 kim cương trắng**.
+Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` để nâng Hero tại ô chọn bằng `--hero-slot 1..12`, hoặc `--upgrade-tower [SỐ_KC]` để nâng tầng tháp thứ hai từ dưới lên, kết hợp cùng bất kỳ chế độ đánh nào (`wave`, `skip`, `replay`). Nếu không truyền số theo sau `--upgrade-hero` / `--upgrade-tower` thì mặc định kích hoạt ở mốc **50 kim cương trắng**. Nếu không chọn ô, Hero mặc định là **ô 3** (góc trên bên phải), tương thích lệnh cũ.
+
+Các ô Hero được đánh số **trái sang phải, trên xuống dưới**:
+
+```text
+ 1   2   3
+ 4   5   6
+ 7   8   9
+10  11  12
+```
+
+Chọn ô có Hero đã gắn. Sau khi kết thúc trận ở chế độ Wave (kể cả Skip), tool chờ màn chính ổn định thêm **4 giây** trước khi nâng Hero hoặc bắt đầu trận tiếp, để thông báo xếp hạng có thời gian biến mất. Chế độ Replay giữ nguyên thời gian như trước. Nếu đang khôi phục một đợt nâng chưa kết thúc sau khi dừng chương trình, hãy chạy lại với ô cũ để xử lý xong đợt đó trước khi đổi ô.
 
 ```powershell
 # Chạy Wave và tự nâng Hero góc trên bên phải khi kim cương trắng >= 50 (mặc định)
 .\.venv\Scripts\python.exe autoplay.py --tap --upgrade-hero
 
-# Tự chọn mốc kim cương trắng để bắt đầu nâng Hero (ví dụ đủ 30 hoặc 80 kim cương trắng là nâng)
-.\.venv\Scripts\python.exe autoplay.py --mode replay --tap --upgrade-hero 30
-.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-hero 80
+# Chọn Hero ô 1 hoặc ô 12, đồng thời chọn mốc 30 hoặc 80 kim cương trắng
+.\.venv\Scripts\python.exe autoplay.py --mode replay --tap --upgrade-hero 30 --hero-slot 1
+.\.venv\Scripts\python.exe autoplay.py --instance Pie64_1 --mode replay --tap --upgrade-hero 80 --hero-slot 12
 
 # Tự nâng Tháp (tầng 2 từ dưới lên) ở mốc mặc định 50 hoặc tự chọn mốc 30 / 60 kim cương trắng
 .\.venv\Scripts\python.exe autoplay.py --tap --upgrade-tower
@@ -117,7 +128,7 @@ Tính năng mặc định tắt. Dùng `--upgrade-hero [SỐ_KC]` (nâng Hero g�
 ```
 
 1. Khi thấy số **kim cương trắng đạt mốc đã chọn** (mặc định `50`, tự bỏ qua phần kim cương cộng thêm màu cam như `+500`):
-   - Với `--upgrade-hero`: tool bấm vào **ô Hero góc trên bên phải** `(461, 92)` để mở bảng thông tin của bất kỳ Hero nào đang gắn tại ô đó.
+   - Với `--upgrade-hero`: tool bấm ô Hero đã chọn bằng `--hero-slot` (mặc định ô 3, `(461, 92)`) để mở bảng thông tin của Hero đang gắn tại ô đó.
    - Với `--upgrade-tower`: tool bấm ô chuyển tầng tháp `(380, 457)` rồi mở ô tầng tháp thứ hai từ dưới lên `(380, 366)` (nhận diện mọi loại tháp lâu đài đang gắn tại ô đó như Lightning, Minigun, Ballista, Cannon, Shield, Gold...).
 2. Tool đọc cấp hiện tại và giá kim cương trên nút **LV UP** (`💎 1`, `2` hoặc `3` kim cương) tại `(896, 470)`. Sau khi nâng 10 cấp và thanh **`LV UP +10`** bật lên ở phía dưới, nếu số kim cương trắng còn lại đủ cho nút **LV UP +10** (`💎 10`, `20`...) và số cấp cần nâng còn từ `10` trở lên thì tool tự động bấm **LV UP +10** `(405, 628)` để tiết kiệm thời gian; khi kim cương trắng còn ít hơn giá `+10` thì tự quay về bấm **LV UP** đơn cho đến hết kim cương trắng.
 3. Sau mỗi lần bấm (`+1` hoặc `+10`), tool xác nhận cấp tăng đúng tương ứng và số kim cương trắng giảm đúng giá vừa đọc. Đợt nâng kết thúc khi đủ số cấp mục tiêu (`max(50, mốc kim cương)`, hoặc tùy chỉnh bằng `--upgrade-levels`), hoặc dừng sớm ngay khi số kim cương trắng còn lại nhỏ hơn giá nâng tiếp theo để **không bao giờ trừ lẹm vào phần kim cương cam (`+500`)**.
@@ -167,7 +178,8 @@ Nếu một lượt tráo quá chồng lấp chưa đủ độ tin cậy hoặc 
 
 - **Tự cast Smith khi máu lâu đài `< 50%`**: Tool theo dõi thanh hồi chiêu của ô Hero **hàng trên cùng ở giữa** `(373, 92)` và mức máu tại mốc `50%` của thanh **Castle HP**. Khi máu `>= 50%` tool giữ nguyên không bấm phí; ngay khi máu tụt `< 50%` sẽ ưu tiên bấm Smith trước tiên.
 - **Mặc định bật `--humanize` khi chạy `--tap`** (có thể tắt bằng `--no-humanize`):
-  - **Giữ nguyên thứ tự và nhịp cast skill như bản gốc**: bấm cố định theo đúng thứ tự **Smith (`HP < 50%`) → Archer 1 → Archer 2 → Hero 1..9** (trái sang phải, trên xuống dưới) với khoảng cách cố định **`0.30s`** giữa các skill, độ trễ vào trận **`0.45s`** và chu kỳ chụp khung hình **`0.22s`** để đảm bảo đúng chuỗi combo tướng.
+  - **Thứ tự cast skill**: ưu tiên **Smith (`HP < 50%`) → Archer 1 → Archer 2**, rồi duyệt Hero 1..9 (trái sang phải, trên xuống dưới) theo vòng. Nếu Archer hoặc Smith xen vào, tool tiếp tục tìm từ Hero sau Hero vừa cast, bỏ qua Hero chưa hồi; sau khi duyệt đến Hero 9 thì vòng lại Hero 1. Trận mới bắt đầu duyệt lại từ Hero 1.
+  - Giữ khoảng cách tối thiểu **`0.30s`** giữa các skill, độ trễ vào trận **`0.45s`** và chu kỳ chụp khung hình **`0.22s`**.
   - **Chạm lệch tâm chống bot**: các cú bấm ô skill dùng chạm nhanh **`35–60ms`** kèm lệch tọa độ nhẹ trong phạm vi ô để không làm trễ nhịp `0.30s`; các nút ngoài trận, nâng cấp, quảng cáo và CAPTCHA giữ chạm tự nhiên (`46–162ms`), độ trượt vi mô (`0–2px`), biến thiên nhịp phản xạ ngoài trận và tự nghỉ ngắn vài giây ở màn chính sau mỗi `18–32` trận.
   - Đặt tên file quay tạm trung lập trong Android (`/data/local/tmp/scr_*.mp4`) và tự xóa sạch sau mỗi lượt CAPTCHA.
 
@@ -206,7 +218,8 @@ Nếu vẫn muốn chạy trên LDPlayer 9, thêm `--emulator ldplayer` hoặc t
 | **Tự động & chống bot** | `--ads` / `--no-ads` | `--ads` | Bật / tắt tự mở và đóng quảng cáo thưởng vàng **GET**. |
 | | `--auto-captcha` / `--no-auto-captcha` | `--auto-captcha` | Bật / tắt tự giải CAPTCHA cốc kim cương khi chạy `--tap`. |
 | | `--humanize` / `--no-humanize` | `--humanize` | Bật / tắt lệch tọa độ chạm tự nhiên, biến thiên thời gian ngoài trận & nghỉ ngắn chống phát hiện bot. |
-| **Nâng cấp kim cương** | `--upgrade-hero [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Hero ô góc trên phải `(461, 92)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| **Nâng cấp kim cương** | `--upgrade-hero [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Hero ở ô đã chọn khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
+| | `--hero-slot {1..12}` | `3` | Chọn ô Hero để nâng; dùng cùng `--upgrade-hero`. Đánh số từ trái sang phải, trên xuống dưới. |
 | | `--upgrade-tower [GEMS]` | Tắt (`50` nếu bật) | Tự nâng Tháp tầng 2 lâu đài `(380, 366)` khi kim cương trắng `>= GEMS` (hỗ trợ nút `+10`). |
 | | `--upgrade-gems GEMS` | — | Ghi đè mốc kim cương trắng kích hoạt cho `--upgrade-hero` / `--upgrade-tower`. |
 | | `--upgrade-levels LEVELS` | `max(50, GEMS)` | Số cấp nâng tối đa trong mỗi đợt nâng cấp. |
