@@ -215,7 +215,8 @@ class Screen:
 
 
 class Vision:
-    def __init__(self, upgrade_tower=True):
+    def __init__(self, upgrade_tower=True, *, skip_tier=0):
+        self.skip_tier = skip_tier
         atlas_path = Path(__file__).with_name("play_templates.npz")
         with np.load(atlas_path, allow_pickle=False) as atlas:
             self.templates = {name: atlas[name].astype(np.int16) for name in TEMPLATES}
@@ -259,8 +260,42 @@ class Vision:
     def white_gems(self, rgb):
         return read_white_gems(rgb, self.gem_templates)
 
-    def detect_skip_options(self, rgb) -> tuple[tuple[int, tuple[int, int]], ...]:
+    def detect_skip_options(self, rgb, *, target_tier=0) -> tuple[tuple[int, tuple[int, int]], ...]:
         height, width = SKIP_30_MASK_SHAPE
+        # Try the chosen tier first at its usual location. A high-confidence
+        # label match is still required; never spend based on position alone.
+        if target_tier in SKIP_TIERS:
+            preferred = SKIP_SLOTS[SKIP_TIERS.index(target_tier)]
+            for bx1, bx2, gx, center in (preferred, *(slot for slot in SKIP_SLOTS if slot != preferred)):
+                button = rgb[316:415, bx1:bx2]
+                red, green, blue = button[:, :, 0], button[:, :, 1], button[:, :, 2]
+                gold = (red > 180) & (green > 115) & (blue < 75) & (red.astype(np.int16) - blue.astype(np.int16) > 120)
+                cost_area = rgb[426:460, bx1:bx2]
+                cr, cg, cb = cost_area[:, :, 0], cost_area[:, :, 1], cost_area[:, :, 2]
+                cyan = (cb > 170) & (cg > 130) & (cb.astype(np.int16) - cr.astype(np.int16) > 60)
+                if gold.mean() < 0.42 or cyan.mean() < 0.04:
+                    continue
+                mask = self.skip_masks[target_tier]
+                for dy in (0, -1, 1, -2, 2, -3, 3):
+                    for dx in (0, -1, 1, -2, 2, -3, 3):
+                        sub = rgb[335 + dy:335 + dy + height, gx + dx:gx + dx + width]
+                        observed = (sub.min(axis=2) > 175) & (np.ptp(sub, axis=2) < 42)
+                        union = np.count_nonzero(observed | mask)
+                        lead_union = np.count_nonzero(observed[:, :36] | mask[:, :36])
+                        if not union or not lead_union:
+                            continue
+                        score = np.count_nonzero(observed & mask) / union
+                        lead = np.count_nonzero(observed[:, :36] & mask[:, :36]) / lead_union
+                        if score < 0.88 or lead < 0.80:
+                            continue
+                        rivals = []
+                        for tier, other in self.skip_masks.items():
+                            if tier != target_tier:
+                                other_union = np.count_nonzero(observed | other)
+                                rivals.append(np.count_nonzero(observed & other) / other_union if other_union else 0)
+                        if all(score >= other + 0.08 for other in rivals):
+                            return ((target_tier, center),)
+        # Unclear labels take the original, more exhaustive matching path.
         found: dict[int, tuple[int, int]] = {}
         for bx1, bx2, gx, center in SKIP_SLOTS:
             button = rgb[316:415, bx1:bx2]
@@ -577,7 +612,7 @@ class Vision:
         if (hud or dim) and self.hp_empty(rgb, dim):
             return Screen("defeat")
         if hud and self.matches(rgb, "skip_title") and self.matches(rgb, "skip_close"):
-            options = self.detect_skip_options(rgb)
+            options = self.detect_skip_options(rgb, target_tier=self.skip_tier)
             return Screen(
                 "skip",
                 SKIP_CLOSE_POINT,
@@ -927,7 +962,12 @@ class Player:
                 smith_ready=screen.smith_ready,
                 hp_low=screen.hp_low,
             )
-        if self.acted or age < self.menu_delay:
+        if self.acted:
+            return None
+        # The offer's own countdown is short: a verified requested tier should
+        # be tapped on the first frame, not after the ordinary menu delay.
+        urgent_skip = name == "skip" and self.skip_waves and self.mode == "wave"
+        if age < self.menu_delay and not urgent_skip:
             return None
         if name == "skip":
             if self.skip_waves and self.mode == "wave":
@@ -943,8 +983,11 @@ class Player:
                     # A partially rendered dialog or unreadable gem counter is not
                     # evidence that Skip is unavailable. Keep sampling rather than
                     # closing the offer before its selected button can be verified.
-                    if age >= 0.8 and not self.wait_notified:
-                        self.report(time, f"Wave Skip {self.skip_waves}: waiting for verified gems and button")
+                    if not self.wait_notified:
+                        available = ",".join(str(tier) for tier in sorted(options)) or "none"
+                        gems = str(screen.gems) if screen.gems is not None else "unreadable"
+                        self.report(time, f"Wave Skip {self.skip_waves}: waiting for verification "
+                                          f"(white gems: {gems}; detected buttons: {available})")
                         self.wait_notified = True
                     return None
             else:
@@ -1093,7 +1136,7 @@ def play(args, target, report, journal):
         skip_waves=skip_tier,
         humanize=use_humanize,
     )
-    vision = Vision(True)
+    vision = Vision(True, skip_tier=skip_tier if is_wave_mode else 0)
     prefix = "TAP" if args.tap else "PREVIEW"
     if args.video:
         frames = replay_frames(args.video)
@@ -1203,7 +1246,7 @@ def play(args, target, report, journal):
                             viewport_size=VIEWPORT,
                             raw_point=action.raw_point,
                             jitter=action_jitter(action),
-                            duration_range=(35, 60) if action.name.startswith("cast ") else None,
+                            duration_range=(35, 60) if action.name.startswith(("cast ", "select Wave Skip ")) else None,
                             rng=_PLAY_RNG,
                         )
                     else:
