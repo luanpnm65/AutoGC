@@ -490,11 +490,12 @@ class Vision:
             return np.mean(difference) < tolerance
         if np.mean(difference[self.wave_text]) < tolerance:
             return True
-        # The top HUD text in native ADB captures is one pixel below the
-        # recorded MP4 samples and has sharper edges.
+        # Native ADB text can be one pixel lower and sharper than the MP4
+        # template. Allow a small margin for its anti-aliasing while still
+        # requiring the WAVE glyph, HUD and speed button to match.
         left, top, right, bottom = box
         shifted = region(rgb, (left, top + 1, right, bottom + 1))
-        return np.mean(np.abs(shifted - template)[self.wave_text]) < 20
+        return np.mean(np.abs(shifted - template)[self.wave_text]) < 23
 
     def hp_empty(self, rgb, dim):
         threshold = 53 if dim else 145
