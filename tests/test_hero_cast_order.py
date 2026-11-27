@@ -9,8 +9,21 @@ import numpy as np
 from PIL import Image
 
 import autoplay
-from autoplay import HERO_SKILLS, Player, Screen, Vision, detect_hero_skills, viewport
+from autoplay import (
+    ARCHER_SKILLS,
+    BOSS_GLYPH,
+    BOSS_ONLY_HERO_SLOT,
+    BOSS_ONLY_SKILL_INDEX,
+    HERO_SKILLS,
+    SKILLS,
+    Player,
+    Screen,
+    Vision,
+    detect_hero_skills,
+    viewport,
+)
 from emulator import EmulatorTarget
+from tower_upgrade import HERO_SLOTS
 
 
 class HeroDetectionTests(unittest.TestCase):
@@ -73,6 +86,7 @@ class HeroDetectionTests(unittest.TestCase):
                 self.assertEqual(screen.name, expected)
                 if expected == "battle":
                     self.assertEqual(screen.ready, (2,))
+                    self.assertEqual(screen.boss, boss)
 
 
 class HeroDecisionTests(unittest.TestCase):
@@ -159,6 +173,89 @@ class HeroDecisionTests(unittest.TestCase):
                 self.assertEqual(player.skills_used, {})
                 player.feed(5, battle)
                 self.assertEqual(player.feed(5.5, battle).name, "cast skill 1")
+
+
+class BossOnlyHeroSlotTests(unittest.TestCase):
+    """Hero slot 12 ("skill 9") only casts while a Boss health bar is visible."""
+
+    def make_player(self, mode="wave"):
+        return Player(mode, lambda *args: None, watch_ads=False)
+
+    def test_slot12_maps_to_bottom_right_hero_skill(self):
+        self.assertEqual(BOSS_ONLY_HERO_SLOT, 12)
+        self.assertEqual(BOSS_ONLY_SKILL_INDEX, len(ARCHER_SKILLS) + 8)
+        self.assertEqual(SKILLS[BOSS_ONLY_SKILL_INDEX], ("skill 9", 453, 331, 370))
+        # Battle tap row matches home-grid slot 12 (bottom-right).
+        self.assertEqual(HERO_SLOTS[BOSS_ONLY_HERO_SLOT - 1], (461, 370))
+
+    def test_every_auto_mode_holds_slot12_until_boss(self):
+        for mode in ("wave", "replay", "skip", "skip10", "skip20", "skip30"):
+            with self.subTest(mode=mode):
+                player = self.make_player(mode)
+                self.assertIsNone(player.cast(0, (BOSS_ONLY_SKILL_INDEX,)))
+                self.assertNotIn(BOSS_ONLY_SKILL_INDEX, player.skills_used)
+                self.assertIsNone(player.cast(1, (BOSS_ONLY_SKILL_INDEX,), boss=False))
+                action = player.cast(2, (BOSS_ONLY_SKILL_INDEX,), boss=True)
+                self.assertEqual(action.name, "cast skill 9")
+                self.assertEqual(action.point, (453, 370))
+
+    def test_other_skills_cast_normally_while_slot12_waits(self):
+        player = self.make_player()
+        ready = (0, 1, 2, BOSS_ONLY_SKILL_INDEX)
+        self.assertEqual(player.cast(0, ready, smith_ready=True, hp_low=True).name,
+                         "cast Smith (HP < 50%)")
+        self.assertEqual(player.cast(0.2, ready).name, "cast archer skill 1")
+        self.assertEqual(player.cast(0.41, ready).name, "cast archer skill 2")
+        self.assertEqual(player.cast(0.62, ready).name, "cast skill 1")
+        self.assertIsNone(player.cast(0.83, ready))  # only slot 12 left, no Boss
+        self.assertEqual(player.cast(1.0, ready, boss=True).name, "cast skill 9")
+
+    def test_feed_passes_boss_flag_and_holds_without_latching(self):
+        player = self.make_player()
+        wave = Screen("battle", ready=(BOSS_ONLY_SKILL_INDEX,))
+        self.assertIsNone(player.feed(0, wave))
+        self.assertIsNone(player.feed(0.5, wave))
+        self.assertIsNone(player.feed(1.0, wave))
+        self.assertNotIn(BOSS_ONLY_SKILL_INDEX, player.skills_used)
+        boss = Screen("battle", ready=(BOSS_ONLY_SKILL_INDEX,), boss=True)
+        self.assertEqual(player.feed(1.5, boss).name, "cast skill 9")
+        # Latched after the cast; a visible Boss does not bypass the latch.
+        self.assertIsNone(player.feed(1.71, boss))
+        self.assertIsNone(player.feed(1.9, Screen("battle", ready=(), boss=True)))
+        self.assertIsNone(player.feed(2.1, Screen("battle", ready=(), boss=True)))
+        self.assertEqual(player.feed(2.3, boss).name, "cast skill 9")
+        # Boss gone: after the latch releases, the ready skill is held again.
+        self.assertIsNone(player.feed(2.5, Screen("battle", ready=(), boss=False)))
+        self.assertIsNone(player.feed(2.7, Screen("battle", ready=(), boss=False)))
+        self.assertNotIn(BOSS_ONLY_SKILL_INDEX, player.skills_used)
+        self.assertIsNone(player.feed(2.9, wave))
+        self.assertEqual(player.feed(3.1, boss).name, "cast skill 9")
+
+    def test_boss_bar_frame_sets_boss_flag_from_real_detector(self):
+        vision = Vision(False)
+        rgb = np.zeros((720, 1280, 3), dtype=np.uint8)
+        colors = {"#": (250, 250, 250), "@": (15, 15, 15), ".": (180, 40, 40)}
+        glyph = np.array([[colors[ch] for ch in row] for row in BOSS_GLYPH], dtype=np.uint8)
+        scale = 1.25
+        width, height = (round(glyph.shape[1] * scale), round(glyph.shape[0] * scale))
+        bar = np.asarray(Image.fromarray(glyph).resize((width, height), Image.Resampling.BILINEAR))
+        rgb[44:44 + height, 600:600 + width] = bar
+        frame = rgb.astype(np.int16)
+        self.assertTrue(vision.matches_boss(frame))
+        # WAVE marker absent: the Boss bar alone must classify the battle and
+        # carry boss=True; a blank frame stays unknown with boss=False.
+        with patch.object(vision, "matches", side_effect=lambda rgb, name, *args:
+                          name in {"hud", "speed"}), \
+                patch.object(vision, "hp_empty", return_value=False), \
+                patch.object(vision, "find_mimic", return_value=None), \
+                patch.object(vision, "smith_skill_ready", return_value=False), \
+                patch.object(vision, "castle_hp_low", return_value=False):
+            screen = vision._classify_game_screen(frame)
+            self.assertEqual(screen.name, "battle")
+            self.assertTrue(screen.boss)
+            blank = vision._classify_game_screen(np.zeros_like(frame))
+            self.assertEqual(blank.name, "unknown")
+            self.assertFalse(blank.boss)
 
 
 class HeroPlayTests(unittest.TestCase):
