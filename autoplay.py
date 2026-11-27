@@ -111,6 +111,12 @@ HERO_SKILLS = tuple(
     )
 )
 SKILLS = ARCHER_SKILLS + HERO_SKILLS
+# Home-grid Hero slots 1..3 sit on the castle roof (only Smith auto-casts there);
+# HERO_SKILLS "skill 1".."skill 9" cover the in-castle slots 4..12. Slot 12
+# (bottom-right, "skill 9") holds its skill until a Boss health bar is visible,
+# in every auto mode (wave, replay, skip/skip10/skip20/skip30).
+BOSS_ONLY_HERO_SLOT = 12
+BOSS_ONLY_SKILL_INDEX = len(ARCHER_SKILLS) + (BOSS_ONLY_HERO_SLOT - 4)
 GAME_SCREENS = {"home", "gold", "replay_menu", "battle", "skip"}
 RETURN_SCREENS = GAME_SCREENS | {"victory", "defeat", "tower", "castles", "captcha"}
 AD_CLOSE_SCREENS = {
@@ -228,6 +234,7 @@ class Screen:
     skip_options: tuple[tuple[int, tuple[int, int]], ...] = ()
     smith_ready: bool = False
     hp_low: bool = False
+    boss: bool = False
     raw_point: bool = False
     keyevent: int | None = None
 
@@ -656,18 +663,22 @@ class Vision:
             kind, gems, level, cost, bulk_cost = panel
             return Screen(kind, gems=gems, level=level, cost=cost, bulk_cost=bulk_cost)
         speed_offsets = tuple(dy for dy in hud_offsets if self.matches(rgb, "speed", dy))
-        if speed_offsets and (any(self.matches(rgb, "wave", dy) for dy in speed_offsets)
-                              or self.matches_boss(rgb)):
-            archers = [index for index, (_, x, bar_y, _) in enumerate(ARCHER_SKILLS)
-                       if _skill_bar_full(rgb, x, bar_y)]
-            heroes = [index + len(ARCHER_SKILLS) for index in detect_hero_skills(rgb)]
-            return Screen(
-                "battle",
-                ready=tuple(archers + heroes),
-                mimic=self.find_mimic(rgb),
-                smith_ready=self.smith_skill_ready(rgb),
-                hp_low=self.castle_hp_low(rgb),
-            )
+        if speed_offsets:
+            # Boss presence is recorded on every battle frame so Hero slot 12
+            # can hold its skill until the Boss health bar shows up.
+            boss = self.matches_boss(rgb)
+            if boss or any(self.matches(rgb, "wave", dy) for dy in speed_offsets):
+                archers = [index for index, (_, x, bar_y, _) in enumerate(ARCHER_SKILLS)
+                           if _skill_bar_full(rgb, x, bar_y)]
+                heroes = [index + len(ARCHER_SKILLS) for index in detect_hero_skills(rgb)]
+                return Screen(
+                    "battle",
+                    ready=tuple(archers + heroes),
+                    mimic=self.find_mimic(rgb),
+                    smith_ready=self.smith_skill_ready(rgb),
+                    hp_low=self.castle_hp_low(rgb),
+                    boss=boss,
+                )
         return Screen("unknown")
 
     def classify(
@@ -988,6 +999,7 @@ class Player:
                 screen.ready,
                 smith_ready=screen.smith_ready,
                 hp_low=screen.hp_low,
+                boss=screen.boss,
             )
         if self.acted:
             return None
@@ -1068,7 +1080,7 @@ class Player:
             if self.skills_used[index] >= 2:
                 del self.skills_used[index]
 
-    def cast(self, time, ready, *, smith_ready=False, hp_low=False):
+    def cast(self, time, ready, *, smith_ready=False, hp_low=False, boss=False):
         self.observe_skill_bars(ready, smith_ready=smith_ready)
         if time - self.last_skill < self.skill_cooldown:
             return None
@@ -1078,8 +1090,12 @@ class Player:
             label, x, _, y = SMITH_SKILL
             return Action(f"cast {label}", (x, y))
         # Smith and Archers remain higher-priority; Hero skills are always
-        # examined from slot 1 through slot 9 on every decision.
+        # examined from slot 1 through slot 9 on every decision. Hero slot 12
+        # ("skill 9") is saved for the Boss: without a visible Boss health bar
+        # it is skipped without latching, so it fires as soon as the Boss shows.
         for index, (label, x, _, y) in enumerate(SKILLS):
+            if index == BOSS_ONLY_SKILL_INDEX and not boss:
+                continue
             if index in ready and index not in self.skills_used:
                 self.skills_used[index] = 0
                 self.last_skill = time
